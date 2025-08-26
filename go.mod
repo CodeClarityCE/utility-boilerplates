@@ -3,9 +3,9 @@ module github.com/CodeClarityCE/utility-boilerplates
 go 1.24.3
 
 require (
-	github.com/CodeClarityCE/utility-amqp-helper v0.0.6-alpha
-	github.com/CodeClarityCE/utility-dbhelper v0.0.8-alpha
-	github.com/CodeClarityCE/utility-types v0.0.11-alpha
+	github.com/CodeClarityCE/utility-amqp-helper v0.0.7-alpha
+	github.com/CodeClarityCE/utility-dbhelper v0.0.9-alpha
+	github.com/CodeClarityCE/utility-types v0.0.12-alpha
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.23.0
 	github.com/rabbitmq/amqp091-go v1.10.0
@@ -25,7 +25,6 @@ require (
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
-	github.com/stretchr/testify v1.11.0 // indirect
 	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
