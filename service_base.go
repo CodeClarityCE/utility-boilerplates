@@ -32,14 +32,15 @@ type QueueConfig struct {
 }
 
 type ServiceBase struct {
-	ConfigSvc   *ConfigService
-	DB          *ServiceDatabases
-	conn        *amqp.Connection
-	channels    map[string]*amqp.Channel
-	queues      []QueueConfig
-	Metrics     *ServiceMetrics
-	ServiceName string
-	Logger      *logrus.Logger
+	ConfigSvc      *ConfigService
+	DB             *ServiceDatabases
+	conn           *amqp.Connection
+	channels       map[string]*amqp.Channel
+	declaredQueues map[string]bool
+	queues         []QueueConfig
+	Metrics        *ServiceMetrics
+	ServiceName    string
+	Logger         *logrus.Logger
 }
 
 func CreateServiceBase() (*ServiceBase, error) {
@@ -99,14 +100,15 @@ func CreateServiceBaseWithName(serviceName string) (*ServiceBase, error) {
 	}
 
 	sb := &ServiceBase{
-		ConfigSvc:   configSvc,
-		DB:          db,
-		conn:        conn,
-		channels:    make(map[string]*amqp.Channel),
-		queues:      make([]QueueConfig, 0),
-		Metrics:     metrics,
-		ServiceName: serviceName,
-		Logger:      logger,
+		ConfigSvc:      configSvc,
+		DB:             db,
+		conn:           conn,
+		channels:       make(map[string]*amqp.Channel),
+		declaredQueues: make(map[string]bool),
+		queues:         make([]QueueConfig, 0),
+		Metrics:        metrics,
+		ServiceName:    serviceName,
+		Logger:         logger,
 	}
 
 	// Set initial health status to healthy
@@ -367,28 +369,38 @@ func (sb *ServiceBase) SendMessage(queueName string, data []byte) error {
 		sb.channels[queueName] = ch
 	}
 
-	q, err := ch.QueueDeclare(
-		queueName, // name
-		true,      // durable
-		false,     // delete when unused
-		false,     // exclusive
-		false,     // no-wait
-		nil,       // arguments
-	)
-	if err != nil {
-		return fmt.Errorf("failed to declare queue for sending: %w", err)
+	// Only declare queue if not already declared on this channel
+	if !sb.declaredQueues[queueName] {
+		_, err := ch.QueueDeclare(
+			queueName, // name
+			true,      // durable
+			false,     // delete when unused
+			false,     // exclusive
+			false,     // no-wait
+			nil,       // arguments
+		)
+		if err != nil {
+			// Invalidate channel cache on error
+			delete(sb.channels, queueName)
+			delete(sb.declaredQueues, queueName)
+			return fmt.Errorf("failed to declare queue for sending: %w", err)
+		}
+		sb.declaredQueues[queueName] = true
 	}
 
-	err = ch.Publish(
-		"",     // exchange
-		q.Name, // routing key
-		false,  // mandatory
-		false,  // immediate
+	err := ch.Publish(
+		"",        // exchange
+		queueName, // routing key
+		false,     // mandatory
+		false,     // immediate
 		amqp.Publishing{
 			ContentType: "text/plain",
 			Body:        data,
 		})
 	if err != nil {
+		// Invalidate channel cache on publish error
+		delete(sb.channels, queueName)
+		delete(sb.declaredQueues, queueName)
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
 
@@ -466,8 +478,9 @@ func (sb *ServiceBase) restart() error {
 	}
 	sb.conn = conn
 
-	// Clear old channels
+	// Clear old channels and queue declaration cache
 	sb.channels = make(map[string]*amqp.Channel)
+	sb.declaredQueues = make(map[string]bool)
 
 	// Restart queue listeners
 	if err := sb.StartListening(); err != nil {
