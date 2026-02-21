@@ -1,6 +1,6 @@
 module github.com/CodeClarityCE/utility-boilerplates
 
-go 1.25.7
+go 1.26.0
 
 require (
 	github.com/CodeClarityCE/utility-amqp-helper v0.0.12-alpha
