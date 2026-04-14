@@ -2,8 +2,11 @@ package boilerplates
 
 import (
 	"fmt"
+	"log"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	dbhelper "github.com/CodeClarityCE/utility-dbhelper/helper"
@@ -18,11 +21,20 @@ type ConfigService struct {
 
 // DatabaseConfig holds database connection configuration
 type DatabaseConfig struct {
-	Host     string        `json:"host"`
-	Port     string        `json:"port"`
-	User     string        `json:"user"`
-	Password string        `json:"password"`
-	Timeout  time.Duration `json:"timeout"`
+	Host        string        `json:"host"`
+	Port        string        `json:"port"`
+	User        string        `json:"user"`
+	Password    string        `json:"password"`
+	SSLMode     string        `json:"sslMode"`
+	SSLRootCert string        `json:"sslRootCert"`
+	SSLCert     string        `json:"sslCert"`
+	SSLKey      string        `json:"sslKey"`
+	Timeout     time.Duration `json:"timeout"`
+}
+
+var validSSLModes = map[string]bool{
+	"disable": true, "allow": true, "prefer": true,
+	"require": true, "verify-ca": true, "verify-full": true,
 }
 
 // AMQPConfig holds AMQP/RabbitMQ configuration
@@ -98,6 +110,8 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 	password := os.Getenv("PG_DB_PASSWORD")
 	if password == "" {
 		errors = append(errors, ConfigError{"PG_DB_PASSWORD", "required environment variable not set"})
+	} else if strings.HasPrefix(password, "!ChangeMe") {
+		log.Printf("WARNING: PG_DB_PASSWORD is still set to a default placeholder — set a real password before deploying to production")
 	}
 
 	// Parse timeout with default
@@ -108,16 +122,38 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 		}
 	}
 
+	// SSL configuration
+	sslMode := os.Getenv("PG_DB_SSLMODE")
+	if sslMode == "" {
+		env := os.Getenv("ENV")
+		if env == "prod" || env == "production" {
+			sslMode = "require"
+		} else {
+			sslMode = "disable"
+		}
+	}
+	if !validSSLModes[sslMode] {
+		errors = append(errors, ConfigError{"PG_DB_SSLMODE", fmt.Sprintf("invalid SSL mode: %s", sslMode)})
+	}
+
+	sslRootCert := os.Getenv("PG_DB_SSLROOTCERT")
+	sslCert := os.Getenv("PG_DB_SSLCERT")
+	sslKey := os.Getenv("PG_DB_SSLKEY")
+
 	if len(errors) > 0 {
 		return DatabaseConfig{}, fmt.Errorf("database configuration errors: %v", errors)
 	}
 
 	return DatabaseConfig{
-		Host:     host,
-		Port:     port,
-		User:     user,
-		Password: password,
-		Timeout:  timeout,
+		Host:        host,
+		Port:        port,
+		User:        user,
+		Password:    password,
+		SSLMode:     sslMode,
+		SSLRootCert: sslRootCert,
+		SSLCert:     sslCert,
+		SSLKey:      sslKey,
+		Timeout:     timeout,
 	}, nil
 }
 
@@ -193,19 +229,32 @@ func (cs *ConfigService) GetDatabaseDSN(dbName string) string {
 		actualDBName = dbhelper.Config.Database.Results
 	case "knowledge":
 		actualDBName = dbhelper.Config.Database.Knowledge
-	case "plugins", "config":
+	case "plugins":
 		actualDBName = dbhelper.Config.Database.Plugins
+	case "config":
+		actualDBName = dbhelper.Config.Database.Config
 	default:
 		actualDBName = dbName // Use as-is for custom databases
 	}
 
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		cs.Database.User,
-		cs.Database.Password,
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		url.QueryEscape(cs.Database.User),
+		url.QueryEscape(cs.Database.Password),
 		cs.Database.Host,
 		cs.Database.Port,
 		actualDBName,
+		cs.Database.SSLMode,
 	)
+	if cs.Database.SSLRootCert != "" {
+		dsn += "&sslrootcert=" + cs.Database.SSLRootCert
+	}
+	if cs.Database.SSLCert != "" {
+		dsn += "&sslcert=" + cs.Database.SSLCert
+	}
+	if cs.Database.SSLKey != "" {
+		dsn += "&sslkey=" + cs.Database.SSLKey
+	}
+	return dsn
 }
 
 // GetDatabaseTimeout returns the configured database timeout

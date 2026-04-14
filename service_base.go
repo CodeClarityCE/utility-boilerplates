@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	dbhelper "github.com/CodeClarityCE/utility-dbhelper/helper"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
@@ -170,12 +169,11 @@ func (sb *ServiceBase) updateConnectionMetrics() {
 }
 
 func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error) {
+	tlsOpt := buildTLSOption(&configSvc.Database)
+
 	// CodeClarity Database (using sql.DB for compatibility)
-	codeClarityDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		configSvc.Database.User, configSvc.Database.Password,
-		configSvc.Database.Host, configSvc.Database.Port,
-		dbhelper.Config.Database.Results)
-	codeClaritySqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(codeClarityDSN), pgdriver.WithTimeout(30*time.Second)))
+	codeClarityDSN := configSvc.GetDatabaseDSN("results")
+	codeClaritySqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(codeClarityDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
 	// Optimize connection pool settings for CodeClarity DB
 	codeClaritySqlDB.SetMaxOpenConns(25)                 // Limit concurrent connections
@@ -188,11 +186,8 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	}
 
 	// Knowledge Database (using bun.DB)
-	knowledgeDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		configSvc.Database.User, configSvc.Database.Password,
-		configSvc.Database.Host, configSvc.Database.Port,
-		dbhelper.Config.Database.Knowledge)
-	knowledgeSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(knowledgeDSN), pgdriver.WithTimeout(30*time.Second)))
+	knowledgeDSN := configSvc.GetDatabaseDSN("knowledge")
+	knowledgeSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(knowledgeDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
 	// Optimize connection pool settings for Knowledge DB (read-heavy workload)
 	knowledgeSqlDB.SetMaxOpenConns(20)
@@ -203,11 +198,8 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	knowledgeDB := bun.NewDB(knowledgeSqlDB, pgdialect.New())
 
 	// Plugins Database (using bun.DB)
-	pluginsDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		configSvc.Database.User, configSvc.Database.Password,
-		configSvc.Database.Host, configSvc.Database.Port,
-		dbhelper.Config.Database.Plugins)
-	pluginsSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(pluginsDSN), pgdriver.WithTimeout(30*time.Second)))
+	pluginsDSN := configSvc.GetDatabaseDSN("plugins")
+	pluginsSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(pluginsDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
 	// Optimize connection pool settings for Plugins DB (moderate workload)
 	pluginsSqlDB.SetMaxOpenConns(15)
@@ -218,11 +210,8 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	pluginsDB := bun.NewDB(pluginsSqlDB, pgdialect.New())
 
 	// Config Database (using bun.DB)
-	configDSN := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
-		configSvc.Database.User, configSvc.Database.Password,
-		configSvc.Database.Host, configSvc.Database.Port,
-		dbhelper.Config.Database.Config)
-	configSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(configDSN), pgdriver.WithTimeout(30*time.Second)))
+	configDSN := configSvc.GetDatabaseDSN("config")
+	configSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(configDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
 	// Optimize connection pool settings for Config DB (low workload)
 	configSqlDB.SetMaxOpenConns(10)
