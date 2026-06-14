@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	amqp_helper "github.com/CodeClarityCE/utility-amqp-helper"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
@@ -232,8 +233,9 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 }
 
 func connectAMQP(configSvc *ConfigService) (*amqp.Connection, error) {
-	// Use pre-constructed URL from config service
-	conn, err := amqp.Dial(configSvc.AMQP.URL)
+	// Use pre-constructed URL from config service. Dial transparently negotiates
+	// TLS when the URL scheme is "amqps" (driven by AMQP_SSLMODE/AMQP_SSLROOTCERT).
+	conn, err := amqp_helper.Dial(configSvc.AMQP.URL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
 	}
