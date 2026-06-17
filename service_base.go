@@ -176,11 +176,8 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	codeClarityDSN := configSvc.GetDatabaseDSN("results")
 	codeClaritySqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(codeClarityDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
-	// Optimize connection pool settings for CodeClarity DB
-	codeClaritySqlDB.SetMaxOpenConns(25)                 // Limit concurrent connections
-	codeClaritySqlDB.SetMaxIdleConns(5)                  // Keep some connections alive
-	codeClaritySqlDB.SetConnMaxLifetime(5 * time.Minute) // Rotate connections
-	codeClaritySqlDB.SetConnMaxIdleTime(1 * time.Minute) // Close idle connections
+	// Bound the connection pool (env-overridable via DB_MAX_OPEN_CONNS etc.)
+	configSvc.Database.ApplyPool(codeClaritySqlDB)
 
 	if err := codeClaritySqlDB.Ping(); err != nil {
 		return nil, fmt.Errorf("codeclarity database ping failed: %w", err)
@@ -190,11 +187,7 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	knowledgeDSN := configSvc.GetDatabaseDSN("knowledge")
 	knowledgeSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(knowledgeDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
-	// Optimize connection pool settings for Knowledge DB (read-heavy workload)
-	knowledgeSqlDB.SetMaxOpenConns(20)
-	knowledgeSqlDB.SetMaxIdleConns(8)
-	knowledgeSqlDB.SetConnMaxLifetime(5 * time.Minute)
-	knowledgeSqlDB.SetConnMaxIdleTime(2 * time.Minute)
+	configSvc.Database.ApplyPool(knowledgeSqlDB)
 
 	knowledgeDB := bun.NewDB(knowledgeSqlDB, pgdialect.New())
 
@@ -202,11 +195,7 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	pluginsDSN := configSvc.GetDatabaseDSN("plugins")
 	pluginsSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(pluginsDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
-	// Optimize connection pool settings for Plugins DB (moderate workload)
-	pluginsSqlDB.SetMaxOpenConns(15)
-	pluginsSqlDB.SetMaxIdleConns(3)
-	pluginsSqlDB.SetConnMaxLifetime(5 * time.Minute)
-	pluginsSqlDB.SetConnMaxIdleTime(1 * time.Minute)
+	configSvc.Database.ApplyPool(pluginsSqlDB)
 
 	pluginsDB := bun.NewDB(pluginsSqlDB, pgdialect.New())
 
@@ -214,11 +203,7 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	configDSN := configSvc.GetDatabaseDSN("config")
 	configSqlDB := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(configDSN), pgdriver.WithTimeout(30*time.Second), tlsOpt))
 
-	// Optimize connection pool settings for Config DB (low workload)
-	configSqlDB.SetMaxOpenConns(10)
-	configSqlDB.SetMaxIdleConns(2)
-	configSqlDB.SetConnMaxLifetime(5 * time.Minute)
-	configSqlDB.SetConnMaxIdleTime(1 * time.Minute)
+	configSvc.Database.ApplyPool(configSqlDB)
 
 	configDB := bun.NewDB(configSqlDB, pgdialect.New())
 

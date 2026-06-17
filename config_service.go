@@ -1,6 +1,7 @@
 package boilerplates
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 	"net/url"
@@ -30,6 +31,13 @@ type DatabaseConfig struct {
 	SSLCert     string        `json:"sslCert"`
 	SSLKey      string        `json:"sslKey"`
 	Timeout     time.Duration `json:"timeout"`
+
+	// Connection pool settings (env-overridable). Bound the per-instance
+	// connection footprint so replicas × pool stays within the server budget.
+	MaxOpenConns    int           `json:"maxOpenConns"`
+	MaxIdleConns    int           `json:"maxIdleConns"`
+	ConnMaxLifetime time.Duration `json:"connMaxLifetime"`
+	ConnMaxIdleTime time.Duration `json:"connMaxIdleTime"`
 }
 
 var validSSLModes = map[string]bool{
@@ -122,6 +130,14 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 		}
 	}
 
+	// Parse connection pool settings with defaults. These bound the per-instance
+	// connection footprint; with a pooler (pgbouncer) in front of Postgres they can
+	// be lowered further via env without code changes.
+	maxOpenConns := envIntDefault("DB_MAX_OPEN_CONNS", 15)
+	maxIdleConns := envIntDefault("DB_MAX_IDLE_CONNS", 3)
+	connMaxLifetime := time.Duration(envIntDefault("DB_CONN_MAX_LIFETIME_SECONDS", 300)) * time.Second
+	connMaxIdleTime := time.Duration(envIntDefault("DB_CONN_MAX_IDLE_SECONDS", 60)) * time.Second
+
 	// SSL configuration
 	sslMode := os.Getenv("PG_DB_SSLMODE")
 	if sslMode == "" {
@@ -145,16 +161,40 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 	}
 
 	return DatabaseConfig{
-		Host:        host,
-		Port:        port,
-		User:        user,
-		Password:    password,
-		SSLMode:     sslMode,
-		SSLRootCert: sslRootCert,
-		SSLCert:     sslCert,
-		SSLKey:      sslKey,
-		Timeout:     timeout,
+		Host:            host,
+		Port:            port,
+		User:            user,
+		Password:        password,
+		SSLMode:         sslMode,
+		SSLRootCert:     sslRootCert,
+		SSLCert:         sslCert,
+		SSLKey:          sslKey,
+		Timeout:         timeout,
+		MaxOpenConns:    maxOpenConns,
+		MaxIdleConns:    maxIdleConns,
+		ConnMaxLifetime: connMaxLifetime,
+		ConnMaxIdleTime: connMaxIdleTime,
 	}, nil
+}
+
+// envIntDefault reads an integer environment variable, returning def when the
+// variable is unset or cannot be parsed.
+func envIntDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil {
+			return parsed
+		}
+	}
+	return def
+}
+
+// ApplyPool applies the configured connection pool bounds to a *sql.DB. This is
+// the single choke point for pool sizing across all services and plugins.
+func (c *DatabaseConfig) ApplyPool(sqldb *sql.DB) {
+	sqldb.SetMaxOpenConns(c.MaxOpenConns)
+	sqldb.SetMaxIdleConns(c.MaxIdleConns)
+	sqldb.SetConnMaxLifetime(c.ConnMaxLifetime)
+	sqldb.SetConnMaxIdleTime(c.ConnMaxIdleTime)
 }
 
 // loadAMQPConfig loads AMQP configuration from environment variables

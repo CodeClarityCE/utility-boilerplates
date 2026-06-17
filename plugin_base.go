@@ -404,6 +404,11 @@ func createDatabaseConnection(dsn string, dbConfig *DatabaseConfig) (*bun.DB, er
 		buildTLSOption(dbConfig),
 	))
 
+	// Bound the connection pool (env-overridable via DB_MAX_OPEN_CONNS etc.).
+	// Without this, plugin pools were unbounded and exhausted Postgres under
+	// high replica fan-out.
+	dbConfig.ApplyPool(sqldb)
+
 	db := bun.NewDB(sqldb, pgdialect.New())
 
 	// Test connection
