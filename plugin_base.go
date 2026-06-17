@@ -155,12 +155,31 @@ func (pb *PluginBase) createCallbackWrapper(handler AnalysisHandler) func(any, p
 			return
 		}
 
+		// Recover from a panic in the plugin handler. The plugin queue auto-acks,
+		// so a panic would otherwise drop the message with the step left STARTED
+		// forever (unreachable by the dispatcher reaper). Record FAILURE + notify
+		// so the analysis becomes terminal, mirroring the error path below.
+		defer func() {
+			if r := recover(); r != nil {
+				pb.logError("Analysis panicked", fmt.Errorf("%v", r))
+				if _, uerr := pb.updateAnalysisStep(analysisDoc, config, map[string]any{}, codeclarity.FAILURE, start, time.Now()); uerr != nil {
+					pb.logError("Failed to record analysis failure after panic", uerr)
+				}
+				pb.notifyCompletion(dispatcherMessage.AnalysisId.String(), config.Name)
+			}
+		}()
+
 		// Execute plugin-specific analysis
 		result, status, err := handler.StartAnalysis(pb.DB, dispatcherMessage, config, analysisDoc)
 		if err != nil {
 			pb.logError("Analysis failed", err)
-			// Update with failure status
-			pb.updateAnalysisStep(analysisDoc, config, map[string]any{}, codeclarity.FAILURE, start, time.Now())
+			// Update with failure status, then notify the dispatcher so it can
+			// finalize the analysis as FAILURE. Without this notification a failed
+			// plugin would leave the analysis stuck non-terminal forever.
+			if _, uerr := pb.updateAnalysisStep(analysisDoc, config, map[string]any{}, codeclarity.FAILURE, start, time.Now()); uerr != nil {
+				pb.logError("Failed to record analysis failure", uerr)
+			}
+			pb.notifyCompletion(dispatcherMessage.AnalysisId.String(), config.Name)
 			return
 		}
 
@@ -260,6 +279,9 @@ func (pb *PluginBase) notifyCompletion(analysisId string, pluginName string) {
 		return
 	}
 
+	// NOTE: amqp_helper.Send does not surface publish errors. A lost completion
+	// notification leaves the analysis non-terminal until the dispatcher's reaper
+	// reconciles it (see reaper.go), which is the recovery path for this gap.
 	amqp_helper.Send("plugins_dispatcher", data)
 }
 

@@ -321,12 +321,23 @@ func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
 					if r := recover(); r != nil {
 						duration := time.Since(start)
 						logrus.WithFields(logrus.Fields{
-							"queue":    config.Name,
-							"error":    r,
-							"duration": duration,
+							"queue":      config.Name,
+							"error":      r,
+							"duration":   duration,
+							"redelivered": d.Redelivered,
 						}).Error("Queue message handler panicked")
 						sb.Metrics.RecordMessageProcessed(config.Name, "panic", duration)
-						d.Nack(false, true) // Requeue message on panic
+						// Requeue once, then drop. A message that deterministically
+						// panics (poison message) would otherwise be redelivered
+						// forever, monopolizing this queue's single consumer and
+						// starving every other message. The redelivery flag lets us
+						// give a transient failure one retry without looping.
+						if d.Redelivered {
+							log.Printf("Queue %s: dropping poison message after redelivery: %v", config.Name, r)
+							d.Nack(false, false) // drop (dead-letter if a DLX is configured)
+						} else {
+							d.Nack(false, true) // first failure: requeue once
+						}
 						return
 					}
 				}()
