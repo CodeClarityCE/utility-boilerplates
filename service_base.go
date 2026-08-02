@@ -292,23 +292,40 @@ func (sb *ServiceBase) StartListening() error {
 }
 
 func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
+	ch, msgs, err := sb.subscribeQueue(config)
+	if err != nil {
+		return err
+	}
+	sb.channels[config.Name] = ch
+	go sb.consumeQueue(config, ch, msgs)
+	return nil
+}
+
+// subscribeQueue opens a channel, declares the queue, and registers a consumer.
+// Factored out of startQueueListener so consumeQueue can re-subscribe after the
+// broker closes the channel (e.g. consumer_timeout on a delivery that waited
+// unacked too long) — previously that silently killed the consumer for the
+// life of the process.
+func (sb *ServiceBase) subscribeQueue(config QueueConfig) (*amqp.Channel, <-chan amqp.Delivery, error) {
 	ch, err := sb.conn.Channel()
 	if err != nil {
-		return fmt.Errorf("failed to open channel: %w", err)
+		return nil, nil, fmt.Errorf("failed to open channel: %w", err)
 	}
 
-	// Optimize channel performance with prefetch settings
+	// Prefetch exactly one delivery. The consume loop below is serial, so a
+	// larger prefetch only parks extra deliveries unacked while earlier ones
+	// process; on long-running queues (downloader clones) a parked delivery can
+	// exceed RabbitMQ's consumer_timeout (30 min default), which closes the
+	// channel and silently kills the consumer.
 	err = ch.Qos(
-		10,    // prefetch count - process up to 10 messages concurrently
+		1,     // prefetch count
 		0,     // prefetch size - 0 means no limit on message size
 		false, // global - apply per consumer
 	)
 	if err != nil {
 		ch.Close()
-		return fmt.Errorf("failed to set QoS: %w", err)
+		return nil, nil, fmt.Errorf("failed to set QoS: %w", err)
 	}
-
-	sb.channels[config.Name] = ch
 
 	q, err := ch.QueueDeclare(
 		config.Name,    // name
@@ -320,7 +337,7 @@ func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
 	)
 	if err != nil {
 		ch.Close()
-		return fmt.Errorf("failed to declare queue: %w", err)
+		return nil, nil, fmt.Errorf("failed to declare queue: %w", err)
 	}
 
 	msgs, err := ch.Consume(
@@ -333,16 +350,24 @@ func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
 		nil,    // args
 	)
 	if err != nil {
-		return fmt.Errorf("failed to register consumer: %w", err)
+		ch.Close()
+		return nil, nil, fmt.Errorf("failed to register consumer: %w", err)
 	}
+	return ch, msgs, nil
+}
 
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Queue %s handler panicked: %v", config.Name, r)
-			}
-		}()
+// consumeQueue drains deliveries serially and, when the broker closes the
+// channel out from under us, re-subscribes with backoff instead of dying. It
+// exits only when the underlying connection is closed — full-connection drops
+// are the connection monitor's job, not ours.
+func (sb *ServiceBase) consumeQueue(config QueueConfig, ch *amqp.Channel, msgs <-chan amqp.Delivery) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Queue %s handler panicked: %v", config.Name, r)
+		}
+	}()
 
+	for {
 		for d := range msgs {
 			start := time.Now()
 
@@ -352,9 +377,9 @@ func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
 					if r := recover(); r != nil {
 						duration := time.Since(start)
 						logrus.WithFields(logrus.Fields{
-							"queue":      config.Name,
-							"error":      r,
-							"duration":   duration,
+							"queue":       config.Name,
+							"error":       r,
+							"duration":    duration,
 							"redelivered": d.Redelivered,
 						}).Error("Queue message handler panicked")
 						sb.Metrics.RecordMessageProcessed(config.Name, "panic", duration)
@@ -384,10 +409,53 @@ func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
 			}()
 		}
 
-		log.Printf("Queue %s consumer stopped", config.Name)
-	}()
+		// msgs closed: broker- or channel-level failure. If the whole
+		// connection is gone, leave recovery to the connection monitor.
+		if sb.conn == nil || sb.conn.IsClosed() {
+			log.Printf("Queue %s consumer stopped (connection closed)", config.Name)
+			return
+		}
+		log.Printf("Queue %s channel closed by broker; re-subscribing", config.Name)
+		backoff := time.Second
+		for {
+			newCh, newMsgs, err := sb.subscribeQueue(config)
+			if err == nil {
+				sb.channels[config.Name] = newCh
+				ch, msgs = newCh, newMsgs
+				log.Printf("Queue %s consumer re-subscribed", config.Name)
+				break
+			}
+			if sb.conn == nil || sb.conn.IsClosed() {
+				log.Printf("Queue %s consumer stopped (connection closed during re-subscribe)", config.Name)
+				return
+			}
+			log.Printf("Queue %s re-subscribe failed (%v); retrying in %s", config.Name, err, backoff)
+			time.Sleep(backoff)
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+		}
+	}
+}
 
-	return nil
+// QueueDepth returns the number of messages currently sitting in a queue,
+// via a passive declare on a short-lived channel (the consumer channels are
+// busy and must not be shared across goroutines). Callers use it to
+// distinguish "message still queued" from "message lost".
+func (sb *ServiceBase) QueueDepth(queueName string) (int, error) {
+	if sb.conn == nil || sb.conn.IsClosed() {
+		return 0, fmt.Errorf("amqp connection closed")
+	}
+	ch, err := sb.conn.Channel()
+	if err != nil {
+		return 0, fmt.Errorf("failed to open channel: %w", err)
+	}
+	defer ch.Close()
+	q, err := ch.QueueDeclarePassive(queueName, true, false, false, false, nil)
+	if err != nil {
+		return 0, fmt.Errorf("passive declare of %s failed: %w", queueName, err)
+	}
+	return q.Messages, nil
 }
 
 func (sb *ServiceBase) SendMessage(queueName string, data []byte) error {
