@@ -230,21 +230,34 @@ func (pb *PluginBase) updateAnalysisInTransaction(
 			return fmt.Errorf("failed to reload analysis: %w", err)
 		}
 
-		// Find and update the correct step
+		// Find and update the correct step by name across ALL stages, rather
+		// than indexing analysisDoc.Steps[analysisDoc.Stage]. When a stage holds
+		// several steps that run concurrently (e.g. vuln-finder + license-finder),
+		// the dispatcher can advance analysisDoc.Stage past this plugin's stage —
+		// even past the end of Steps — before this slower step's result lands.
+		// Indexing by the live Stage then panicked with index-out-of-range,
+		// killing the plugin's AMQP consumer and stalling every queued analysis.
+		// A plugin appears exactly once across the stages, so matching by name is
+		// unambiguous and independent of the volatile Stage pointer.
 		stepFound := false
-		for stepId, step := range analysisDoc.Steps[analysisDoc.Stage] {
-			if step.Name == config.Name {
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Status = status
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Result = result
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Started_on = start.Format(time.RFC3339Nano)
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Ended_on = end.Format(time.RFC3339Nano)
-				stepFound = true
+		for stageId := range analysisDoc.Steps {
+			for stepId := range analysisDoc.Steps[stageId] {
+				if analysisDoc.Steps[stageId][stepId].Name == config.Name {
+					analysisDoc.Steps[stageId][stepId].Status = status
+					analysisDoc.Steps[stageId][stepId].Result = result
+					analysisDoc.Steps[stageId][stepId].Started_on = start.Format(time.RFC3339Nano)
+					analysisDoc.Steps[stageId][stepId].Ended_on = end.Format(time.RFC3339Nano)
+					stepFound = true
+					break
+				}
+			}
+			if stepFound {
 				break
 			}
 		}
 
 		if !stepFound {
-			return fmt.Errorf("step %s not found in stage %d", config.Name, analysisDoc.Stage)
+			return fmt.Errorf("step %s not found in any of %d stage(s)", config.Name, len(analysisDoc.Steps))
 		}
 
 		// Save updated analysis

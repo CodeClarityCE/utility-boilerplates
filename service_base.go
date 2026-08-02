@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -217,14 +218,59 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	}, nil
 }
 
+// amqpConnectMaxWait bounds how long connectAMQP retries before giving up.
+// Overridable via AMQP_CONNECT_MAX_WAIT_SECONDS; defaults to 120s.
+func amqpConnectMaxWait() time.Duration {
+	const def = 120 * time.Second
+	v := os.Getenv("AMQP_CONNECT_MAX_WAIT_SECONDS")
+	if v == "" {
+		return def
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		log.Printf("[amqp] invalid AMQP_CONNECT_MAX_WAIT_SECONDS=%q, using default %s", v, def)
+		return def
+	}
+	return time.Duration(secs) * time.Second
+}
+
 func connectAMQP(configSvc *ConfigService) (*amqp.Connection, error) {
 	// Use pre-constructed URL from config service. Dial transparently negotiates
 	// TLS when the URL scheme is "amqps" (driven by AMQP_SSLMODE/AMQP_SSLROOTCERT).
-	conn, err := amqp_helper.Dial(configSvc.AMQP.URL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+	//
+	// Retry with capped backoff rather than failing fast: a service often starts
+	// before RabbitMQ's listener is accepting (the depends_on healthcheck can pass
+	// before the AMQP/TLS port is ready) or while RabbitMQ is restarting (e.g. on a
+	// `make up` cycle, where its container IP changes). Without this, the process
+	// exits and the supervisor (air/docker restart:always) crash-loops, and if every
+	// retry lands inside RabbitMQ's downtime window the service never attaches —
+	// leaving queues with zero consumers. Runtime drops are handled separately by
+	// monitorConnection/restart.
+	deadline := time.Now().Add(amqpConnectMaxWait())
+	backoff := 500 * time.Millisecond
+	const maxBackoff = 5 * time.Second
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		conn, err := amqp_helper.Dial(configSvc.AMQP.URL)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("[amqp] connected to RabbitMQ after %d attempt(s)", attempt)
+			}
+			return conn, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			break
+		}
+		log.Printf("[amqp] connect attempt %d failed (%v); retrying in %s", attempt, err, backoff)
+		time.Sleep(backoff)
+		if backoff < maxBackoff {
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
-	return conn, nil
+	return nil, fmt.Errorf("failed to connect to RabbitMQ after %s: %w", amqpConnectMaxWait(), lastErr)
 }
 
 func (sb *ServiceBase) AddQueue(name string, durable bool, handler func(d amqp.Delivery)) {
