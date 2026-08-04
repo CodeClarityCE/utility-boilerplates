@@ -155,10 +155,11 @@ func (pb *PluginBase) createCallbackWrapper(handler AnalysisHandler) func(any, p
 			return
 		}
 
-		// Recover from a panic in the plugin handler. The plugin queue auto-acks,
-		// so a panic would otherwise drop the message with the step left STARTED
-		// forever (unreachable by the dispatcher reaper). Record FAILURE + notify
-		// so the analysis becomes terminal, mirroring the error path below.
+		// Recover from a panic in the plugin handler. The listener acks after this
+		// callback returns; letting a panic escape would instead nack/redeliver
+		// (re-running a crashed analysis) with the step left STARTED. Record
+		// FAILURE + notify so the analysis becomes terminal, mirroring the error
+		// path below.
 		defer func() {
 			if r := recover(); r != nil {
 				pb.logError("Analysis panicked", fmt.Errorf("%v", r))
