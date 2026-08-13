@@ -293,10 +293,16 @@ func (pb *PluginBase) notifyCompletion(analysisId string, pluginName string) {
 		return
 	}
 
-	// NOTE: amqp_helper.Send does not surface publish errors. A lost completion
-	// notification leaves the analysis non-terminal until the dispatcher's reaper
-	// reconciles it (see reaper.go), which is the recovery path for this gap.
-	amqp_helper.Send("plugins_dispatcher", data)
+	// TrySend, not Send: Send panics on publish failure, and a panic here would
+	// unwind into the callback's recover, which records the step as FAILURE —
+	// clobbering an already-persisted successful result (observed after a host
+	// sleep/wake killed the publisher connection: every completing plugin was
+	// marked failure). A lost completion notification merely leaves the analysis
+	// non-terminal until the dispatcher's reaper reconciles it (see reaper.go),
+	// which is the intended recovery path for this gap.
+	if err := amqp_helper.TrySend("plugins_dispatcher", data); err != nil {
+		pb.logError("Failed to notify dispatcher of completion (reaper will reconcile)", err)
+	}
 }
 
 // logError logs errors with plugin context
