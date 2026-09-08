@@ -113,7 +113,7 @@ func (u *MergerUtils) LogMergeOperation(operation string, inputCount int, output
 }
 
 // ValidateNonEmptySlice checks if a slice is not empty and logs a warning if it is
-func (u *MergerUtils) ValidateNonEmptySlice(slice []interface{}, description string) bool {
+func (u *MergerUtils) ValidateNonEmptySlice(slice []any, description string) bool {
 	if len(slice) == 0 {
 		log.Printf("Warning: %s is empty during merge operation", description)
 		return false

@@ -3,6 +3,7 @@ package boilerplates
 import (
 	"fmt"
 	"log"
+	"maps"
 )
 
 // LicenseWorkspaceInfo represents workspace license information in a generic way
@@ -148,9 +149,7 @@ func mergeDependencyInfo(existing, new map[string]LicenseDependencyInfo, utils *
 	merged := make(map[string]LicenseDependencyInfo)
 
 	// Copy existing dependencies
-	for key, info := range existing {
-		merged[key] = info
-	}
+	maps.Copy(merged, existing)
 
 	// Add or merge new dependencies
 	for key, newInfo := range new {

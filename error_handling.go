@@ -48,8 +48,8 @@ type EcosystemError struct {
 	Recoverable bool          `json:"recoverable"`
 
 	// Additional context
-	StackTrace string                 `json:"stackTrace,omitempty"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	StackTrace string         `json:"stackTrace,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
 }
 
 // Error implements the error interface
@@ -84,7 +84,7 @@ func NewEcosystemError(message string, cause error) *EcosystemError {
 		Severity:    ErrorSeverityMedium,  // default
 		Category:    ErrorCategoryUnknown, // default
 		Recoverable: false,                // default
-		Metadata:    make(map[string]interface{}),
+		Metadata:    make(map[string]any),
 	}
 }
 
@@ -99,7 +99,7 @@ func NewErrorBuilder(message string) *EcosystemErrorBuilder {
 		error: &EcosystemError{
 			Message:   message,
 			Timestamp: time.Now(),
-			Metadata:  make(map[string]interface{}),
+			Metadata:  make(map[string]any),
 		},
 	}
 }
@@ -162,7 +162,7 @@ func (eb *EcosystemErrorBuilder) WithStackTrace() *EcosystemErrorBuilder {
 }
 
 // WithMetadata adds metadata to the error
-func (eb *EcosystemErrorBuilder) WithMetadata(key string, value interface{}) *EcosystemErrorBuilder {
+func (eb *EcosystemErrorBuilder) WithMetadata(key string, value any) *EcosystemErrorBuilder {
 	eb.error.Metadata[key] = value
 	return eb
 }
@@ -319,7 +319,7 @@ func (strategy ErrorRecoveryStrategy) GetRetryDelay(attemptCount int) time.Durat
 
 	// Exponential backoff
 	multiplier := 1.0
-	for i := 0; i < attemptCount; i++ {
+	for range attemptCount {
 		multiplier *= strategy.BackoffFactor
 	}
 

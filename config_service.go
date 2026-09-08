@@ -346,8 +346,8 @@ func (cs *ConfigService) Validate() error {
 }
 
 // GetEnvironmentInfo returns a summary of the current environment configuration
-func (cs *ConfigService) GetEnvironmentInfo() map[string]interface{} {
-	return map[string]interface{}{
+func (cs *ConfigService) GetEnvironmentInfo() map[string]any {
+	return map[string]any{
 		"environment":      cs.General.Environment,
 		"log_level":        cs.General.LogLevel,
 		"database_host":    cs.Database.Host,

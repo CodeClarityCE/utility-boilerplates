@@ -16,7 +16,7 @@ import (
 // SBOMAnalyzer defines the interface that all language-specific SBOM analyzers must implement
 type SBOMAnalyzer interface {
 	// AnalyzeProject performs the SBOM analysis for a specific language
-	AnalyzeProject(projectPath string, analysisId string, knowledgeDB interface{}) (SBOMOutput, error)
+	AnalyzeProject(projectPath string, analysisId string, knowledgeDB any) (SBOMOutput, error)
 
 	// CanAnalyze checks if this analyzer can handle the given project
 	CanAnalyze(projectPath string) bool
@@ -77,7 +77,7 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 	// Perform the analysis
 	log.Printf("%s SBOM Analysis - Starting analysis for project: %s", h.Analyzer.GetLanguage(), projectPath)
 
-	var knowledgeDB interface{}
+	var knowledgeDB any
 	if databases.Knowledge != nil {
 		knowledgeDB = databases.Knowledge
 	}
@@ -171,7 +171,7 @@ func (h *GenericSBOMHandler) handleFailure(
 				},
 			},
 		},
-		"workspaces": []interface{}{},
+		"workspaces": []any{},
 	}
 
 	// Store the failure result
