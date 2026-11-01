@@ -2,6 +2,8 @@ package boilerplates
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -153,12 +155,32 @@ func (pb *PluginBase) createCallbackWrapper(handler AnalysisHandler) func(any, p
 			return
 		}
 
+		// Recover from a panic in the plugin handler. The listener acks after this
+		// callback returns; letting a panic escape would instead nack/redeliver
+		// (re-running a crashed analysis) with the step left STARTED. Record
+		// FAILURE + notify so the analysis becomes terminal, mirroring the error
+		// path below.
+		defer func() {
+			if r := recover(); r != nil {
+				pb.logError("Analysis panicked", fmt.Errorf("%v", r))
+				if _, uerr := pb.updateAnalysisStep(analysisDoc, config, map[string]any{}, codeclarity.FAILURE, start, time.Now()); uerr != nil {
+					pb.logError("Failed to record analysis failure after panic", uerr)
+				}
+				pb.notifyCompletion(dispatcherMessage.AnalysisId.String(), config.Name)
+			}
+		}()
+
 		// Execute plugin-specific analysis
 		result, status, err := handler.StartAnalysis(pb.DB, dispatcherMessage, config, analysisDoc)
 		if err != nil {
 			pb.logError("Analysis failed", err)
-			// Update with failure status
-			pb.updateAnalysisStep(analysisDoc, config, map[string]any{}, codeclarity.FAILURE, start, time.Now())
+			// Update with failure status, then notify the dispatcher so it can
+			// finalize the analysis as FAILURE. Without this notification a failed
+			// plugin would leave the analysis stuck non-terminal forever.
+			if _, uerr := pb.updateAnalysisStep(analysisDoc, config, map[string]any{}, codeclarity.FAILURE, start, time.Now()); uerr != nil {
+				pb.logError("Failed to record analysis failure", uerr)
+			}
+			pb.notifyCompletion(dispatcherMessage.AnalysisId.String(), config.Name)
 			return
 		}
 
@@ -202,27 +224,41 @@ func (pb *PluginBase) updateAnalysisInTransaction(
 ) (codeclarity.Analysis, error) {
 
 	err := pb.DB.Codeclarity.RunInTx(context.Background(), &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
-		// Reload analysis document to get latest state
-		err := tx.NewSelect().Model(&analysisDoc).WherePK().Scan(ctx)
+		// Reload analysis document with row lock to prevent lost updates
+		// when multiple plugins complete concurrently
+		err := tx.NewSelect().Model(&analysisDoc).WherePK().For("UPDATE").Scan(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to reload analysis: %w", err)
 		}
 
-		// Find and update the correct step
+		// Find and update the correct step by name across ALL stages, rather
+		// than indexing analysisDoc.Steps[analysisDoc.Stage]. When a stage holds
+		// several steps that run concurrently (e.g. vuln-finder + license-finder),
+		// the dispatcher can advance analysisDoc.Stage past this plugin's stage —
+		// even past the end of Steps — before this slower step's result lands.
+		// Indexing by the live Stage then panicked with index-out-of-range,
+		// killing the plugin's AMQP consumer and stalling every queued analysis.
+		// A plugin appears exactly once across the stages, so matching by name is
+		// unambiguous and independent of the volatile Stage pointer.
 		stepFound := false
-		for stepId, step := range analysisDoc.Steps[analysisDoc.Stage] {
-			if step.Name == config.Name {
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Status = status
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Result = result
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Started_on = start.Format(time.RFC3339Nano)
-				analysisDoc.Steps[analysisDoc.Stage][stepId].Ended_on = end.Format(time.RFC3339Nano)
-				stepFound = true
+		for stageId := range analysisDoc.Steps {
+			for stepId := range analysisDoc.Steps[stageId] {
+				if analysisDoc.Steps[stageId][stepId].Name == config.Name {
+					analysisDoc.Steps[stageId][stepId].Status = status
+					analysisDoc.Steps[stageId][stepId].Result = result
+					analysisDoc.Steps[stageId][stepId].Started_on = start.Format(time.RFC3339Nano)
+					analysisDoc.Steps[stageId][stepId].Ended_on = end.Format(time.RFC3339Nano)
+					stepFound = true
+					break
+				}
+			}
+			if stepFound {
 				break
 			}
 		}
 
 		if !stepFound {
-			return fmt.Errorf("step %s not found in stage %d", config.Name, analysisDoc.Stage)
+			return fmt.Errorf("step %s not found in any of %d stage(s)", config.Name, len(analysisDoc.Steps))
 		}
 
 		// Save updated analysis
@@ -257,7 +293,16 @@ func (pb *PluginBase) notifyCompletion(analysisId string, pluginName string) {
 		return
 	}
 
-	amqp_helper.Send("plugins_dispatcher", data)
+	// TrySend, not Send: Send panics on publish failure, and a panic here would
+	// unwind into the callback's recover, which records the step as FAILURE —
+	// clobbering an already-persisted successful result (observed after a host
+	// sleep/wake killed the publisher connection: every completing plugin was
+	// marked failure). A lost completion notification merely leaves the analysis
+	// non-terminal until the dispatcher's reaper reconciles it (see reaper.go),
+	// which is the intended recovery path for this gap.
+	if err := amqp_helper.TrySend("plugins_dispatcher", data); err != nil {
+		pb.logError("Failed to notify dispatcher of completion (reaper will reconcile)", err)
+	}
 }
 
 // logError logs errors with plugin context
@@ -318,20 +363,20 @@ func readPluginConfig() (plugin_db.Plugin, error) {
 // initializeDatabases creates all required database connections
 func initializeDatabases(configSvc *ConfigService) (*PluginDatabases, error) {
 	// Create codeclarity database connection
-	codeclarity, err := createDatabaseConnection(configSvc.GetDatabaseDSN("results"))
+	codeclarity, err := createDatabaseConnection(configSvc.GetDatabaseDSN("results"), &configSvc.Database)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to codeclarity db: %w", err)
 	}
 
 	// Create knowledge database connection
-	knowledge, err := createDatabaseConnection(configSvc.GetDatabaseDSN("knowledge"))
+	knowledge, err := createDatabaseConnection(configSvc.GetDatabaseDSN("knowledge"), &configSvc.Database)
 	if err != nil {
 		codeclarity.Close()
 		return nil, fmt.Errorf("failed to connect to knowledge db: %w", err)
 	}
 
 	// Create plugins database connection
-	plugins, err := createDatabaseConnection(configSvc.GetDatabaseDSN("plugins"))
+	plugins, err := createDatabaseConnection(configSvc.GetDatabaseDSN("plugins"), &configSvc.Database)
 	if err != nil {
 		codeclarity.Close()
 		knowledge.Close()
@@ -345,12 +390,44 @@ func initializeDatabases(configSvc *ConfigService) (*PluginDatabases, error) {
 	}, nil
 }
 
+// buildTLSOption returns the pgdriver TLS option for the given database config.
+// This explicitly configures TLS rather than relying on pgdriver's DSN parsing,
+// which can silently fall back to non-TLS on cert loading errors.
+func buildTLSOption(dbConfig *DatabaseConfig) pgdriver.Option {
+	switch dbConfig.SSLMode {
+	case "require":
+		return pgdriver.WithTLSConfig(&tls.Config{
+			InsecureSkipVerify: true,
+		})
+	case "verify-ca", "verify-full":
+		tlsConfig := &tls.Config{
+			ServerName: dbConfig.Host,
+		}
+		if dbConfig.SSLRootCert != "" {
+			if caCert, err := os.ReadFile(dbConfig.SSLRootCert); err == nil {
+				pool := x509.NewCertPool()
+				pool.AppendCertsFromPEM(caCert)
+				tlsConfig.RootCAs = pool
+			}
+		}
+		return pgdriver.WithTLSConfig(tlsConfig)
+	default:
+		return pgdriver.WithInsecure(true)
+	}
+}
+
 // createDatabaseConnection creates a new database connection with standard settings
-func createDatabaseConnection(dsn string) (*bun.DB, error) {
+func createDatabaseConnection(dsn string, dbConfig *DatabaseConfig) (*bun.DB, error) {
 	sqldb := sql.OpenDB(pgdriver.NewConnector(
 		pgdriver.WithDSN(dsn),
-		pgdriver.WithTimeout(50*time.Second),
+		pgdriver.WithTimeout(dbConfig.Timeout),
+		buildTLSOption(dbConfig),
 	))
+
+	// Bound the connection pool (env-overridable via DB_MAX_OPEN_CONNS etc.).
+	// Without this, plugin pools were unbounded and exhausted Postgres under
+	// high replica fan-out.
+	dbConfig.ApplyPool(sqldb)
 
 	db := bun.NewDB(sqldb, pgdialect.New())
 
