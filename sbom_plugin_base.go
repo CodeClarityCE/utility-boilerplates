@@ -2,6 +2,7 @@ package boilerplates
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -65,13 +66,13 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 	// Extract project path from analysis configuration
 	projectPath, err := h.extractProjectPath(analysisDoc, config)
 	if err != nil {
-		return h.handleFailure(databases, dispatcherMessage, config, err, "Project path extraction failed")
+		return h.handleFailure(databases, dispatcherMessage, config, err, "the project source could not be found")
 	}
 
 	// Check if the analyzer can handle this project
 	if !h.Analyzer.CanAnalyze(projectPath) {
 		err := fmt.Errorf("project at %s cannot be analyzed by %s analyzer", projectPath, h.Analyzer.GetLanguage())
-		return h.handleFailure(databases, dispatcherMessage, config, err, "Project not compatible with analyzer")
+		return h.handleFailure(databases, dispatcherMessage, config, err, fmt.Sprintf("no %s manifest was found in the project", h.Analyzer.GetLanguage()))
 	}
 
 	// Perform the analysis
@@ -84,12 +85,13 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 
 	sbomOutput, err := h.Analyzer.AnalyzeProject(projectPath, analysisDoc.Id.String(), knowledgeDB)
 	if err != nil {
-		return h.handleFailure(databases, dispatcherMessage, config, err, "SBOM analysis failed")
+		return h.handleFailure(databases, dispatcherMessage, config, err, h.analysisFailedReason())
 	}
 
 	// Store the result
+	outputMap := h.Analyzer.ConvertToMap(sbomOutput)
 	result := codeclarity.Result{
-		Result:     h.Analyzer.ConvertToMap(sbomOutput),
+		Result:     outputMap,
 		AnalysisId: dispatcherMessage.AnalysisId,
 		Plugin:     config.Name,
 		CreatedOn:  time.Now(),
@@ -108,10 +110,46 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 		"language":     h.Analyzer.GetLanguage(),
 	}
 
+	if sbomOutput.GetStatus() == codeclarity.FAILURE {
+		reason := latestPublicError(outputMap)
+		if reason == "" {
+			reason = h.analysisFailedReason()
+		}
+		response[codeclarity.StepFailureReasonKey] = reason
+		log.Printf("%s SBOM Analysis - Failed: %s", h.Analyzer.GetLanguage(), reason)
+		return response, codeclarity.FAILURE, nil
+	}
+
 	log.Printf("%s SBOM Analysis - Completed successfully. Dependencies: %d, Framework: %s",
 		h.Analyzer.GetLanguage(), h.Analyzer.GetDependencyCount(sbomOutput), sbomOutput.GetFramework())
 
 	return response, sbomOutput.GetStatus(), nil
+}
+
+// analysisFailedReason is the reason shown when the analyzer gave no readable cause.
+func (h *GenericSBOMHandler) analysisFailedReason() string {
+	return fmt.Sprintf("the %s dependencies could not be analyzed", h.Analyzer.GetLanguage())
+}
+
+// latestPublicError returns the newest public error in an SBOM output, or "".
+func latestPublicError(output map[string]any) string {
+	raw, err := json.Marshal(output)
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		AnalysisInfo struct {
+			Errors []exceptions.Error `json:"errors"`
+		} `json:"analysis_info"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return ""
+	}
+	errs := parsed.AnalysisInfo.Errors
+	if len(errs) == 0 {
+		return ""
+	}
+	return errs[len(errs)-1].Public.Description
 }
 
 // extractProjectPath extracts and validates the project path from the analysis configuration
@@ -150,9 +188,9 @@ func (h *GenericSBOMHandler) handleFailure(
 	dispatcherMessage types_amqp.DispatcherPluginMessage,
 	config plugin_db.Plugin,
 	originalError error,
-	description string,
+	reason string,
 ) (map[string]any, codeclarity.AnalysisStatus, error) {
-	log.Printf("%s SBOM Analysis - Failure: %s - %v", h.Analyzer.GetLanguage(), description, originalError)
+	log.Printf("%s SBOM Analysis - Failure: %s - %v", h.Analyzer.GetLanguage(), reason, originalError)
 
 	// Create failure output with standardized error structure
 	failureOutput := map[string]any{
@@ -162,7 +200,7 @@ func (h *GenericSBOMHandler) handleFailure(
 				{
 					Public: exceptions.ErrorContent{
 						Type:        exceptions.GENERIC_ERROR,
-						Description: description,
+						Description: reason,
 					},
 					Private: exceptions.ErrorContent{
 						Type:        "SBOMAnalysisException",
@@ -188,7 +226,7 @@ func (h *GenericSBOMHandler) handleFailure(
 		// Don't return this error, return the original analysis error
 	}
 
-	return map[string]any{"sbomKey": result.Id}, codeclarity.FAILURE, nil
+	return map[string]any{"sbomKey": result.Id, codeclarity.StepFailureReasonKey: reason}, codeclarity.FAILURE, nil
 }
 
 // CreateSBOMPlugin creates and starts a complete SBOM plugin with the given analyzer
