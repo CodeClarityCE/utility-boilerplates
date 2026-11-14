@@ -3,9 +3,9 @@ module github.com/CodeClarityCE/utility-boilerplates
 go 1.27.4
 
 require (
-	github.com/CodeClarityCE/utility-amqp-helper v0.0.13-alpha
-	github.com/CodeClarityCE/utility-dbhelper v0.0.16-alpha
-	github.com/CodeClarityCE/utility-types v0.0.20-alpha
+	github.com/CodeClarityCE/utility-amqp-helper v0.0.14-alpha
+	github.com/CodeClarityCE/utility-dbhelper v0.0.17-alpha
+	github.com/CodeClarityCE/utility-types v0.0.21-alpha
 	github.com/google/uuid v1.6.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/rabbitmq/amqp091-go v1.15.0
