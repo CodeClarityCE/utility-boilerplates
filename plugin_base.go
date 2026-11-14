@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -443,29 +444,53 @@ func createDatabaseConnection(dsn string, dbConfig *DatabaseConfig) (*bun.DB, er
 	return db, nil
 }
 
-// registerPlugin registers the plugin in the plugins database
+// registerPlugin records the plugin in the plugins database, one row per name.
+// It is an upsert, so replicas starting together leave a single row.
 func registerPlugin(config plugin_db.Plugin, db *bun.DB) error {
 	ctx := context.Background()
 
+	_, err := db.NewInsert().
+		Model(&config).
+		On("CONFLICT (name) DO UPDATE").
+		Set("version = EXCLUDED.version").
+		Set("description = EXCLUDED.description").
+		Set("depends_on = EXCLUDED.depends_on").
+		Set("config = EXCLUDED.config").
+		Exec(ctx)
+	if isMissingConflictTarget(err) {
+		// The unique constraint migration has not run yet.
+		return registerPluginIfAbsent(ctx, config, db)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to register plugin: %w", err)
+	}
+	log.Printf("Plugin %s registered", config.Name)
+	return nil
+}
+
+// isMissingConflictTarget reports a Postgres error for ON CONFLICT without a matching constraint.
+func isMissingConflictTarget(err error) bool {
+	var pgErr pgdriver.Error
+	return errors.As(err, &pgErr) && pgErr.Field('C') == "42P10"
+}
+
+// registerPluginIfAbsent inserts the plugin only when no row has its name.
+func registerPluginIfAbsent(ctx context.Context, config plugin_db.Plugin, db *bun.DB) error {
 	exists, err := db.NewSelect().
 		Model((*plugin_db.Plugin)(nil)).
 		Where("name = ?", config.Name).
 		Exists(ctx)
-
 	if err != nil {
 		return fmt.Errorf("failed to check plugin existence: %w", err)
 	}
-
-	if !exists {
-		_, err = db.NewInsert().Model(&config).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to register plugin: %w", err)
-		}
-		log.Printf("Plugin %s registered successfully", config.Name)
-	} else {
+	if exists {
 		log.Printf("Plugin %s already registered", config.Name)
+		return nil
 	}
-
+	if _, err = db.NewInsert().Model(&config).Exec(ctx); err != nil {
+		return fmt.Errorf("failed to register plugin: %w", err)
+	}
+	log.Printf("Plugin %s registered", config.Name)
 	return nil
 }
 
