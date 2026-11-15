@@ -184,3 +184,81 @@ func TestRegistrationWorksBeforeTheUniqueConstraintMigration(t *testing.T) {
 		t.Fatalf("want 1 registry row, got %d", len(rows))
 	}
 }
+
+func TestAnOlderReplicaDoesNotDowngradeTheRow(t *testing.T) {
+	database := scratchRegistry(t, true)
+	db := openTestDB(t, database)
+	defer db.Close()
+
+	newer := testPluginConfig("v0.0.10-alpha")
+	newer.Description = "Newer description"
+	if err := registerPlugin(newer, db); err != nil {
+		t.Fatalf("newer registration: %v", err)
+	}
+	older := testPluginConfig("v0.0.9-alpha")
+	older.Description = "Older description"
+	if err := registerPlugin(older, db); err != nil {
+		t.Fatalf("older registration: %v", err)
+	}
+
+	got := registryRows(t, db, "js-sbom")[0]
+	if got.Version != "v0.0.10-alpha" || got.Description != "Newer description" {
+		t.Errorf("row downgraded: version %q, description %q", got.Version, got.Description)
+	}
+}
+
+func TestTheSameVersionRefreshesTheRow(t *testing.T) {
+	database := scratchRegistry(t, true)
+	db := openTestDB(t, database)
+	defer db.Close()
+
+	if err := registerPlugin(testPluginConfig("1.0.0"), db); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+	again := testPluginConfig("1.0.0")
+	again.Description = "Fixed description"
+	if err := registerPlugin(again, db); err != nil {
+		t.Fatalf("second registration: %v", err)
+	}
+
+	if got := registryRows(t, db, "js-sbom")[0]; got.Description != "Fixed description" {
+		t.Errorf("same version did not refresh the row: %q", got.Description)
+	}
+}
+
+func TestMixedVersionReplicasStartingTogetherKeepTheNewest(t *testing.T) {
+	for round := 0; round < 10; round++ {
+		database := scratchRegistry(t, true)
+		versions := []string{"1.0.0", "1.1.0", "1.0.0", "1.1.0"}
+		dbs := make([]*bun.DB, len(versions))
+		for i := range dbs {
+			dbs[i] = openTestDB(t, database)
+			if err := dbs[i].Ping(); err != nil {
+				t.Fatalf("replica connect: %v", err)
+			}
+			defer dbs[i].Close()
+		}
+		start := make(chan struct{})
+		errs := make([]error, len(versions))
+		var wg sync.WaitGroup
+		for i := range dbs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				errs[i] = registerPlugin(testPluginConfig(versions[i]), dbs[i])
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: replica %d: %v", round, i, err)
+			}
+		}
+		rows := registryRows(t, dbs[0], "js-sbom")
+		if len(rows) != 1 || rows[0].Version != "1.1.0" {
+			t.Fatalf("round %d: want one 1.1.0 row, got %+v", round, rows)
+		}
+	}
+}
