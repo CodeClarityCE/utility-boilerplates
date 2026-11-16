@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -443,29 +444,66 @@ func createDatabaseConnection(dsn string, dbConfig *DatabaseConfig) (*bun.DB, er
 	return db, nil
 }
 
-// registerPlugin registers the plugin in the plugins database
+// versionKey turns a version column into its numbers in order, e.g. {0,0,27} for v0.0.27-alpha.
+func versionKey(column string) string {
+	return "(SELECT coalesce(array_agg(m[1]::numeric ORDER BY n), '{}') FROM regexp_matches(coalesce(" +
+		column + ", ''), '\\d+', 'g') WITH ORDINALITY AS t(m, n))"
+}
+
+// registerPlugin records the plugin in the plugins database, one row per name.
+// An older version never overwrites a newer one, so mixed replicas settle on the newest.
 func registerPlugin(config plugin_db.Plugin, db *bun.DB) error {
 	ctx := context.Background()
+	fields := logrus.Fields{"plugin": config.Name, "version": config.Version}
 
+	res, err := db.NewInsert().
+		Model(&config).
+		On("CONFLICT (name) DO UPDATE").
+		Set("version = EXCLUDED.version").
+		Set("description = EXCLUDED.description").
+		Set("depends_on = EXCLUDED.depends_on").
+		Set("config = EXCLUDED.config").
+		Where(versionKey("EXCLUDED.version") + " >= " + versionKey(`"plugin"."version"`)).
+		Exec(ctx)
+	if isMissingConflictTarget(err) {
+		// The unique constraint migration has not run yet.
+		return registerPluginIfAbsent(ctx, config, db)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to register plugin: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		logrus.WithFields(fields).Info("A newer version of the plugin is already registered")
+		return nil
+	}
+	logrus.WithFields(fields).Info("Plugin registered")
+	return nil
+}
+
+// isMissingConflictTarget reports a Postgres error for ON CONFLICT without a matching constraint.
+func isMissingConflictTarget(err error) bool {
+	var pgErr pgdriver.Error
+	return errors.As(err, &pgErr) && pgErr.Field('C') == "42P10"
+}
+
+// registerPluginIfAbsent inserts the plugin only when no row has its name.
+func registerPluginIfAbsent(ctx context.Context, config plugin_db.Plugin, db *bun.DB) error {
 	exists, err := db.NewSelect().
 		Model((*plugin_db.Plugin)(nil)).
 		Where("name = ?", config.Name).
 		Exists(ctx)
-
 	if err != nil {
 		return fmt.Errorf("failed to check plugin existence: %w", err)
 	}
-
-	if !exists {
-		_, err = db.NewInsert().Model(&config).Exec(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to register plugin: %w", err)
-		}
-		log.Printf("Plugin %s registered successfully", config.Name)
-	} else {
-		log.Printf("Plugin %s already registered", config.Name)
+	fields := logrus.Fields{"plugin": config.Name, "version": config.Version}
+	if exists {
+		logrus.WithFields(fields).Info("Plugin already registered")
+		return nil
 	}
-
+	if _, err = db.NewInsert().Model(&config).Exec(ctx); err != nil {
+		return fmt.Errorf("failed to register plugin: %w", err)
+	}
+	logrus.WithFields(fields).Info("Plugin registered")
 	return nil
 }
 
