@@ -67,8 +67,14 @@ func CreatePluginBase() (*PluginBase, error) {
 		return nil, fmt.Errorf("failed to read plugin config: %w", err)
 	}
 
+	// Built before connecting, so the database retry lines are JSON too
+	logger := logrus.New()
+	logger.SetFormatter(&logrus.JSONFormatter{})
+	logger.SetLevel(logrus.InfoLevel)
+	logger.WithField("service", config.Name).Info("Plugin starting")
+
 	// Initialize databases
-	databases, err := initializeDatabases(configSvc)
+	databases, err := initializeDatabases(configSvc, logger.WithField("service", config.Name))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize databases: %w", err)
 	}
@@ -79,12 +85,6 @@ func CreatePluginBase() (*PluginBase, error) {
 		log.Printf("Plugin registration failed (non-fatal): %v", err)
 		// Don't fail startup for registration issues
 	}
-
-	// Initialize structured logger
-	logger := logrus.New()
-	logger.SetFormatter(&logrus.JSONFormatter{})
-	logger.SetLevel(logrus.InfoLevel)
-	logger.WithField("service", config.Name).Info("Plugin starting")
 
 	// Create health status metric
 	healthGauge := prometheus.NewGaugeVec(
@@ -362,8 +362,8 @@ func readPluginConfig() (plugin_db.Plugin, error) {
 }
 
 // initializeDatabases creates all required database connections
-func initializeDatabases(configSvc *ConfigService) (*PluginDatabases, error) {
-	retry := defaultConnectRetry()
+func initializeDatabases(configSvc *ConfigService, log logrus.FieldLogger) (*PluginDatabases, error) {
+	retry := defaultConnectRetry(log)
 
 	// Create codeclarity database connection
 	codeclarity, err := createDatabaseConnection("codeclarity", configSvc.GetDatabaseDSN("results"), &configSvc.Database, retry)
