@@ -180,8 +180,10 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	// Bound the connection pool (env-overridable via DB_MAX_OPEN_CONNS etc.)
 	configSvc.Database.ApplyPool(codeClaritySqlDB)
 
-	if err := codeClaritySqlDB.Ping(); err != nil {
-		return nil, fmt.Errorf("codeclarity database ping failed: %w", err)
+	// Wait for the database, which may still be starting
+	if err := defaultConnectRetry().pingUntilReady("codeclarity", codeClaritySqlDB.PingContext); err != nil {
+		codeClaritySqlDB.Close()
+		return nil, fmt.Errorf("codeclarity %w", err)
 	}
 
 	// Knowledge Database (using bun.DB)

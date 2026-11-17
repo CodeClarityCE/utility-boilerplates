@@ -363,21 +363,23 @@ func readPluginConfig() (plugin_db.Plugin, error) {
 
 // initializeDatabases creates all required database connections
 func initializeDatabases(configSvc *ConfigService) (*PluginDatabases, error) {
+	retry := defaultConnectRetry()
+
 	// Create codeclarity database connection
-	codeclarity, err := createDatabaseConnection(configSvc.GetDatabaseDSN("results"), &configSvc.Database)
+	codeclarity, err := createDatabaseConnection("codeclarity", configSvc.GetDatabaseDSN("results"), &configSvc.Database, retry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to codeclarity db: %w", err)
 	}
 
 	// Create knowledge database connection
-	knowledge, err := createDatabaseConnection(configSvc.GetDatabaseDSN("knowledge"), &configSvc.Database)
+	knowledge, err := createDatabaseConnection("knowledge", configSvc.GetDatabaseDSN("knowledge"), &configSvc.Database, retry)
 	if err != nil {
 		codeclarity.Close()
 		return nil, fmt.Errorf("failed to connect to knowledge db: %w", err)
 	}
 
 	// Create plugins database connection
-	plugins, err := createDatabaseConnection(configSvc.GetDatabaseDSN("plugins"), &configSvc.Database)
+	plugins, err := createDatabaseConnection("plugins", configSvc.GetDatabaseDSN("plugins"), &configSvc.Database, retry)
 	if err != nil {
 		codeclarity.Close()
 		knowledge.Close()
@@ -418,7 +420,7 @@ func buildTLSOption(dbConfig *DatabaseConfig) pgdriver.Option {
 }
 
 // createDatabaseConnection creates a new database connection with standard settings
-func createDatabaseConnection(dsn string, dbConfig *DatabaseConfig) (*bun.DB, error) {
+func createDatabaseConnection(database, dsn string, dbConfig *DatabaseConfig, retry connectRetry) (*bun.DB, error) {
 	sqldb := sql.OpenDB(pgdriver.NewConnector(
 		pgdriver.WithDSN(dsn),
 		pgdriver.WithTimeout(dbConfig.Timeout),
@@ -432,13 +434,10 @@ func createDatabaseConnection(dsn string, dbConfig *DatabaseConfig) (*bun.DB, er
 
 	db := bun.NewDB(sqldb, pgdialect.New())
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
+	// Wait for the database, which may still be starting
+	if err := retry.pingUntilReady(database, db.PingContext); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("database ping failed: %w", err)
+		return nil, err
 	}
 
 	return db, nil
