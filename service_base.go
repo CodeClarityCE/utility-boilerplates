@@ -60,23 +60,7 @@ func CreateServiceBaseWithName(serviceName string) (*ServiceBase, error) {
 		return nil, fmt.Errorf("config service init failed: %w", err)
 	}
 
-	db, err := connectServiceDatabases(configSvc)
-	if err != nil {
-		return nil, fmt.Errorf("database connection failed: %w", err)
-	}
-
-	conn, err := connectAMQP(configSvc)
-	if err != nil {
-		return nil, fmt.Errorf("AMQP connection failed: %w", err)
-	}
-
-	// Initialize metrics
-	metrics := CreateServiceMetrics(serviceName)
-
-	// Start metrics server
-	StartMetricsServer("8080")
-
-	// Initialize structured logger
+	// Built before connecting, so the database retry lines are JSON too
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{
 		TimestampFormat: time.RFC3339,
@@ -99,6 +83,22 @@ func CreateServiceBaseWithName(serviceName string) (*ServiceBase, error) {
 	default:
 		logger.SetLevel(logrus.InfoLevel)
 	}
+
+	db, err := connectServiceDatabases(configSvc, logger.WithField("service", serviceName))
+	if err != nil {
+		return nil, fmt.Errorf("database connection failed: %w", err)
+	}
+
+	conn, err := connectAMQP(configSvc)
+	if err != nil {
+		return nil, fmt.Errorf("AMQP connection failed: %w", err)
+	}
+
+	// Initialize metrics
+	metrics := CreateServiceMetrics(serviceName)
+
+	// Start metrics server
+	StartMetricsServer("8080")
 
 	sb := &ServiceBase{
 		ConfigSvc:      configSvc,
@@ -170,7 +170,7 @@ func (sb *ServiceBase) updateConnectionMetrics() {
 	}
 }
 
-func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error) {
+func connectServiceDatabases(configSvc *ConfigService, log logrus.FieldLogger) (*ServiceDatabases, error) {
 	tlsOpt := buildTLSOption(&configSvc.Database)
 
 	// CodeClarity Database (using sql.DB for compatibility)
@@ -180,8 +180,10 @@ func connectServiceDatabases(configSvc *ConfigService) (*ServiceDatabases, error
 	// Bound the connection pool (env-overridable via DB_MAX_OPEN_CONNS etc.)
 	configSvc.Database.ApplyPool(codeClaritySqlDB)
 
-	if err := codeClaritySqlDB.Ping(); err != nil {
-		return nil, fmt.Errorf("codeclarity database ping failed: %w", err)
+	// Wait for the database, which may still be starting
+	if err := defaultConnectRetry(log).pingUntilReady("codeclarity", codeClaritySqlDB.PingContext); err != nil {
+		codeClaritySqlDB.Close()
+		return nil, fmt.Errorf("codeclarity %w", err)
 	}
 
 	// Knowledge Database (using bun.DB)
@@ -566,7 +568,7 @@ func (sb *ServiceBase) restart() error {
 	sb.ConfigSvc = configSvc
 
 	// Reinitialize databases
-	db, err := connectServiceDatabases(configSvc)
+	db, err := connectServiceDatabases(configSvc, sb.Logger.WithField("service", sb.ServiceName))
 	if err != nil {
 		return fmt.Errorf("database restart failed: %w", err)
 	}
