@@ -151,8 +151,16 @@ func (pb *PluginBase) createCallbackWrapper(handler AnalysisHandler) func(any, p
 		ctx := context.Background()
 		analysisDoc := codeclarity.Analysis{Id: dispatcherMessage.AnalysisId}
 		err = pb.DB.Codeclarity.NewSelect().Model(&analysisDoc).WherePK().Scan(ctx)
+		if errors.Is(err, sql.ErrNoRows) {
+			pb.logSkipped(dispatcherMessage.AnalysisId.String(), "the analysis was deleted")
+			return
+		}
 		if err != nil {
 			pb.logError("Failed to retrieve analysis document", err)
+			return
+		}
+		if analysisDoc.Status == codeclarity.CANCELLED {
+			pb.logSkipped(dispatcherMessage.AnalysisId.String(), "the analysis was cancelled")
 			return
 		}
 
@@ -304,6 +312,14 @@ func (pb *PluginBase) notifyCompletion(analysisId string, pluginName string) {
 	if err := amqp_helper.TrySend("plugins_dispatcher", data); err != nil {
 		pb.logError("Failed to notify dispatcher of completion (reaper will reconcile)", err)
 	}
+}
+
+// logSkipped records that a message was dropped because its analysis is gone or cancelled.
+func (pb *PluginBase) logSkipped(analysisId string, reason string) {
+	pb.Logger.WithFields(logrus.Fields{
+		"plugin":      pb.Config.Name,
+		"analysis_id": analysisId,
+	}).Info("Skipping analysis: " + reason)
 }
 
 // logError logs errors with plugin context
