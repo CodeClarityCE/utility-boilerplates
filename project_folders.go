@@ -67,10 +67,8 @@ func (p ProjectFolders) For(language string) []string {
 	return paths
 }
 
-// ScanProjectFolders finds the projects in a source tree. A root with any manifest or
-// lockfile is the only project, as before. Otherwise each subfolder up to
-// MaxProjectFolderDepth levels down with a manifest and a lockfile is a project, and one
-// with a manifest but no lockfile is skipped. Dependency and hidden folders are not scanned.
+// ScanProjectFolders finds the projects: the root if it has a manifest or lockfile, else each
+// subfolder up to MaxProjectFolderDepth with both; one with only a manifest is skipped.
 func ScanProjectFolders(root string) ProjectFolders {
 	found := ProjectFolders{Projects: []ProjectFolder{}, Skipped: []SkippedFolder{}}
 	for _, language := range projectLanguages {

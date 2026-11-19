@@ -18,6 +18,7 @@ import (
 	codeclarity "github.com/CodeClarityCE/utility-types/codeclarity_db"
 	"github.com/CodeClarityCE/utility-types/exceptions"
 	plugin_db "github.com/CodeClarityCE/utility-types/plugin_db"
+	"github.com/sirupsen/logrus"
 )
 
 // SBOMAnalyzer defines the interface that all language-specific SBOM analyzers must implement
@@ -139,9 +140,8 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 	return response, sbomOutput.GetStatus(), nil
 }
 
-// analyzeSubfolders analyses each subfolder project and stores one result whose workspaces
-// are keyed by folder ("api", "api/packages/ui"). A folder that fails is skipped with its
-// reason; the step fails only when every folder does.
+// analyzeSubfolders stores one result with a workspace per subfolder project, like "api".
+// A failed folder is skipped with its reason; the step fails only when every folder does.
 func (h *GenericSBOMHandler) analyzeSubfolders(
 	databases *PluginDatabases,
 	dispatcherMessage types_amqp.DispatcherPluginMessage,
@@ -161,10 +161,11 @@ func (h *GenericSBOMHandler) analyzeSubfolders(
 	failureReason := ""
 	packageCount := 0
 	for _, folder := range subfolders {
-		log.Printf("%s SBOM Analysis - Starting analysis for subfolder: %s", h.Analyzer.GetLanguage(), folder)
+		folderLog := logrus.WithFields(logrus.Fields{"analysis_id": analysisDoc.Id.String(), "language": h.Analyzer.GetLanguage(), "folder": folder})
+		folderLog.Info("SBOM analysis of subfolder started")
 		output, err := h.Analyzer.AnalyzeProject(filepath.Join(projectPath, folder), analysisDoc.Id.String(), knowledgeDB)
 		if err != nil {
-			log.Printf("%s SBOM Analysis - Subfolder %s failed: %v", h.Analyzer.GetLanguage(), folder, err)
+			folderLog.WithError(err).Warn("SBOM analysis of subfolder failed")
 			skipped = append(skipped, SkippedFolder{Path: folder, Reason: h.analysisFailedReason()})
 			continue
 		}
@@ -231,7 +232,10 @@ func (h *GenericSBOMHandler) analyzeSubfolders(
 	if status == codeclarity.FAILURE {
 		response[codeclarity.StepFailureReasonKey] = failureReason
 	}
-	log.Printf("%s SBOM Analysis - Subfolders done: workspaces=%v skipped=%v", h.Analyzer.GetLanguage(), response["workspaces"], skipped)
+	logrus.WithFields(logrus.Fields{
+		"analysis_id": analysisDoc.Id.String(), "language": h.Analyzer.GetLanguage(),
+		"workspaces": response["workspaces"], "skipped_folders": skipped,
+	}).Info("SBOM analysis of subfolders done")
 	return response, status, nil
 }
 
