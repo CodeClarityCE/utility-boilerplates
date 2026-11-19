@@ -5,13 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os"
+	"path"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
 	"time"
 
 	types_amqp "github.com/CodeClarityCE/utility-types/amqp"
 	codeclarity "github.com/CodeClarityCE/utility-types/codeclarity_db"
 	"github.com/CodeClarityCE/utility-types/exceptions"
 	plugin_db "github.com/CodeClarityCE/utility-types/plugin_db"
+	"github.com/sirupsen/logrus"
 )
 
 // SBOMAnalyzer defines the interface that all language-specific SBOM analyzers must implement
@@ -69,6 +76,12 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 		return h.handleFailure(databases, dispatcherMessage, config, err, "the project source could not be found")
 	}
 
+	// Without a root manifest, each subfolder project of this language is a workspace.
+	folders := ScanProjectFolders(projectPath)
+	if subfolders := folders.For(h.Analyzer.GetLanguage()); len(subfolders) > 0 && subfolders[0] != "." {
+		return h.analyzeSubfolders(databases, dispatcherMessage, config, analysisDoc, projectPath, subfolders, folders.Skipped)
+	}
+
 	// Check if the analyzer can handle this project
 	if !h.Analyzer.CanAnalyze(projectPath) {
 		err := fmt.Errorf("project at %s cannot be analyzed by %s analyzer", projectPath, h.Analyzer.GetLanguage())
@@ -108,6 +121,7 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 		"packageCount": h.Analyzer.GetDependencyCount(sbomOutput),
 		"framework":    sbomOutput.GetFramework(),
 		"language":     h.Analyzer.GetLanguage(),
+		"workspaces":   workspaceNames(outputMap),
 	}
 
 	if sbomOutput.GetStatus() == codeclarity.FAILURE {
@@ -124,6 +138,145 @@ func (h *GenericSBOMHandler) performSBOMAnalysis(
 		h.Analyzer.GetLanguage(), h.Analyzer.GetDependencyCount(sbomOutput), sbomOutput.GetFramework())
 
 	return response, sbomOutput.GetStatus(), nil
+}
+
+// analyzeSubfolders stores one result with a workspace per subfolder project, like "api".
+// A failed folder is skipped with its reason; the step fails only when every folder does.
+func (h *GenericSBOMHandler) analyzeSubfolders(
+	databases *PluginDatabases,
+	dispatcherMessage types_amqp.DispatcherPluginMessage,
+	config plugin_db.Plugin,
+	analysisDoc codeclarity.Analysis,
+	projectPath string,
+	subfolders []string,
+	skipped []SkippedFolder,
+) (map[string]any, codeclarity.AnalysisStatus, error) {
+	var knowledgeDB any
+	if databases.Knowledge != nil {
+		knowledgeDB = databases.Knowledge
+	}
+	skipped = slices.Clone(skipped)
+	workspaces := map[string]any{}
+	var merged, firstFailure map[string]any
+	failureReason := ""
+	packageCount := 0
+	for _, folder := range subfolders {
+		folderLog := logrus.WithFields(logrus.Fields{"analysis_id": analysisDoc.Id.String(), "language": h.Analyzer.GetLanguage(), "folder": folder})
+		folderLog.Info("SBOM analysis of subfolder started")
+		output, err := h.Analyzer.AnalyzeProject(filepath.Join(projectPath, folder), analysisDoc.Id.String(), knowledgeDB)
+		if err != nil {
+			folderLog.WithError(err).Warn("SBOM analysis of subfolder failed")
+			skipped = append(skipped, SkippedFolder{Path: folder, Reason: h.analysisFailedReason()})
+			continue
+		}
+		outputMap := h.Analyzer.ConvertToMap(output)
+		if output.GetStatus() == codeclarity.FAILURE {
+			reason := latestPublicError(outputMap)
+			if reason == "" {
+				reason = h.analysisFailedReason()
+			}
+			skipped = append(skipped, SkippedFolder{Path: folder, Reason: reason})
+			if firstFailure == nil {
+				firstFailure, failureReason = outputMap, reason
+			}
+			continue
+		}
+		if merged == nil {
+			merged = outputMap
+		}
+		forEachWorkspace(outputMap, func(name string, workspace any) {
+			workspaces[path.Join(folder, name)] = workspace
+		})
+		packageCount += h.Analyzer.GetDependencyCount(output)
+	}
+	slices.SortFunc(skipped, func(a, b SkippedFolder) int { return strings.Compare(a.Path, b.Path) })
+
+	status := codeclarity.SUCCESS
+	if merged == nil {
+		status = codeclarity.FAILURE
+		merged = firstFailure
+		if merged == nil {
+			merged = map[string]any{}
+		}
+		if failureReason == "" {
+			failureReason = h.analysisFailedReason()
+		}
+	}
+	stored := maps.Clone(merged)
+	stored["workspaces"] = workspaces
+	if names := workspaceNames(stored); len(names) > 0 {
+		stored["analysis_info"] = withDefaultWorkspace(stored["analysis_info"], names[0])
+	}
+	stored["skipped_folders"] = skipped
+
+	result := codeclarity.Result{
+		Result:     stored,
+		AnalysisId: dispatcherMessage.AnalysisId,
+		Plugin:     config.Name,
+		CreatedOn:  time.Now(),
+	}
+	if _, err := databases.Codeclarity.NewInsert().Model(&result).Exec(context.Background()); err != nil {
+		return nil, codeclarity.FAILURE, fmt.Errorf("failed to save result: %w", err)
+	}
+
+	response := map[string]any{
+		"sbomKey":      result.Id,
+		"packageCount": packageCount,
+		"framework":    "",
+		"language":     h.Analyzer.GetLanguage(),
+		"workspaces":   workspaceNames(stored),
+	}
+	if len(skipped) > 0 {
+		response["skipped_folders"] = skipped
+	}
+	if status == codeclarity.FAILURE {
+		response[codeclarity.StepFailureReasonKey] = failureReason
+	}
+	logrus.WithFields(logrus.Fields{
+		"analysis_id": analysisDoc.Id.String(), "language": h.Analyzer.GetLanguage(),
+		"workspaces": response["workspaces"], "skipped_folders": skipped,
+	}).Info("SBOM analysis of subfolders done")
+	return response, status, nil
+}
+
+// forEachWorkspace calls fn for each entry of an SBOM output's workspaces map, whatever its value type.
+func forEachWorkspace(output map[string]any, fn func(name string, workspace any)) {
+	value := reflect.ValueOf(output["workspaces"])
+	if value.Kind() != reflect.Map || value.Type().Key().Kind() != reflect.String {
+		return
+	}
+	iter := value.MapRange()
+	for iter.Next() {
+		fn(iter.Key().String(), iter.Value().Interface())
+	}
+}
+
+// withDefaultWorkspace returns a copy of an SBOM analysis_info naming the default workspace.
+func withDefaultWorkspace(info any, name string) any {
+	raw, err := json.Marshal(info)
+	if err != nil {
+		return info
+	}
+	var copied map[string]any
+	if json.Unmarshal(raw, &copied) != nil || copied == nil {
+		return info
+	}
+	workspaces, _ := copied["workspaces"].(map[string]any)
+	if workspaces == nil {
+		workspaces = map[string]any{}
+	}
+	workspaces["default_workspace_name"] = name
+	workspaces["work_spaces_used"] = true
+	copied["workspaces"] = workspaces
+	return copied
+}
+
+// workspaceNames lists an SBOM output's workspace names, sorted.
+func workspaceNames(output map[string]any) []string {
+	names := []string{}
+	forEachWorkspace(output, func(name string, _ any) { names = append(names, name) })
+	slices.Sort(names)
+	return names
 }
 
 // analysisFailedReason is the reason shown when the analyzer gave no readable cause.
