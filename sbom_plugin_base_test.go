@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -168,5 +169,157 @@ func TestSuccessfulSBOMReportsNoFailureReason(t *testing.T) {
 	}
 	if _, found := result[codeclarity.StepFailureReasonKey]; found {
 		t.Errorf("unexpected failure reason in %v", result)
+	}
+}
+
+// folderAnalyzer is a JavaScript analyzer whose output lists the workspaces given per folder name.
+type folderAnalyzer struct {
+	workspaces map[string][]string
+	failing    map[string]string
+	analysed   *[]string
+}
+
+type folderOutput struct {
+	folder string
+	status codeclarity.AnalysisStatus
+}
+
+func (o folderOutput) GetStatus() codeclarity.AnalysisStatus { return o.status }
+func (o folderOutput) GetFramework() string                  { return "" }
+
+func (a folderAnalyzer) AnalyzeProject(path string, _ string, _ any) (SBOMOutput, error) {
+	folder := filepath.Base(path)
+	*a.analysed = append(*a.analysed, folder)
+	if _, failed := a.failing[folder]; failed {
+		return folderOutput{folder, codeclarity.FAILURE}, nil
+	}
+	return folderOutput{folder, codeclarity.SUCCESS}, nil
+}
+func (a folderAnalyzer) CanAnalyze(path string) bool {
+	_, err := os.Stat(filepath.Join(path, "package.json"))
+	return err == nil
+}
+func (a folderAnalyzer) GetLanguage() string           { return "JavaScript" }
+func (a folderAnalyzer) DetectFramework(string) string { return "" }
+func (a folderAnalyzer) ConvertToMap(output SBOMOutput) map[string]any {
+	folder := output.(folderOutput).folder
+	if reason, failed := a.failing[folder]; failed {
+		return publicErrors(reason)
+	}
+	workspaces := map[string]any{}
+	for _, w := range a.workspaces[folder] {
+		workspaces[w] = map[string]any{"dependencies": map[string]any{}}
+	}
+	return map[string]any{
+		"workspaces":    workspaces,
+		"analysis_info": map[string]any{"status": "success", "package_manager": "NPM"},
+	}
+}
+func (a folderAnalyzer) GetDependencyCount(output SBOMOutput) int {
+	return len(a.workspaces[output.(folderOutput).folder])
+}
+
+// runFolders runs a JavaScript SBOM step over a project laid out with the given files.
+func runFolders(t *testing.T, analyzer folderAnalyzer, files ...string) (map[string]any, codeclarity.AnalysisStatus) {
+	t.Helper()
+	base := t.TempDir()
+	for _, f := range files {
+		path := filepath.Join(base, "project", f)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("DOWNLOAD_PATH", base)
+	db := bun.NewDB(sql.OpenDB(fakeConnector{}), pgdialect.New())
+	defer db.Close()
+	handler := &GenericSBOMHandler{Analyzer: analyzer}
+	result, status, err := handler.StartAnalysis(
+		&PluginDatabases{Codeclarity: db},
+		types_amqp.DispatcherPluginMessage{AnalysisId: uuid.New()},
+		plugin_db.Plugin{Name: "js-sbom"},
+		codeclarity.Analysis{Id: uuid.New(), Config: map[string]any{"js-sbom": map[string]any{"project": "project"}}},
+	)
+	if err != nil {
+		t.Fatalf("StartAnalysis returned an error: %v", err)
+	}
+	return result, status
+}
+
+func TestSubfolderProjectsBecomeWorkspaces(t *testing.T) {
+	analysed := []string{}
+	analyzer := folderAnalyzer{
+		workspaces: map[string][]string{"api": {"."}, "frontend": {".", "packages/ui"}},
+		analysed:   &analysed,
+	}
+	result, status := runFolders(t, analyzer,
+		"api/package.json", "api/pnpm-lock.yaml", "frontend/package.json", "frontend/package-lock.json")
+	if status != codeclarity.SUCCESS {
+		t.Fatalf("status = %q, want success (%v)", status, result)
+	}
+	if !slices.Equal(analysed, []string{"api", "frontend"}) {
+		t.Errorf("analysed %v, want api and frontend", analysed)
+	}
+	if got := result["workspaces"]; !slices.Equal(got.([]string), []string{"api", "frontend", "frontend/packages/ui"}) {
+		t.Errorf("workspaces = %v", got)
+	}
+	if got := result["packageCount"]; got != 3 {
+		t.Errorf("packageCount = %v, want 3", got)
+	}
+}
+
+func TestRootManifestIsAnalysedAlone(t *testing.T) {
+	analysed := []string{}
+	analyzer := folderAnalyzer{workspaces: map[string][]string{"project": {".", "api"}}, analysed: &analysed}
+	result, status := runFolders(t, analyzer, "package.json", "pnpm-lock.yaml", "api/package.json", "web/package.json", "web/yarn.lock")
+	if status != codeclarity.SUCCESS {
+		t.Fatalf("status = %q, want success (%v)", status, result)
+	}
+	if !slices.Equal(analysed, []string{"project"}) {
+		t.Errorf("analysed %v, want only the root", analysed)
+	}
+	if got := result["workspaces"]; !slices.Equal(got.([]string), []string{".", "api"}) {
+		t.Errorf("workspaces = %v", got)
+	}
+	if _, found := result["skipped_folders"]; found {
+		t.Errorf("a root project reports skipped folders: %v", result["skipped_folders"])
+	}
+}
+
+func TestSkippedSubfoldersAreReportedWithoutFailing(t *testing.T) {
+	analysed := []string{}
+	analyzer := folderAnalyzer{
+		workspaces: map[string][]string{"api": {"."}},
+		failing:    map[string]string{"broken": "Unable to parse lock file, is it a valid lockfile?"},
+		analysed:   &analysed,
+	}
+	result, status := runFolders(t, analyzer,
+		"api/package.json", "api/package-lock.json", "docs/package.json", "broken/package.json", "broken/yarn.lock")
+	if status != codeclarity.SUCCESS {
+		t.Fatalf("status = %q, want success (%v)", status, result)
+	}
+	if got := result["workspaces"]; !slices.Equal(got.([]string), []string{"api"}) {
+		t.Errorf("workspaces = %v", got)
+	}
+	want := []SkippedFolder{
+		{Path: "broken", Reason: "Unable to parse lock file, is it a valid lockfile?"},
+		{Path: "docs", Reason: "package.json has no lockfile (package-lock.json, yarn.lock, pnpm-lock.yaml)"},
+	}
+	if got, _ := result["skipped_folders"].([]SkippedFolder); !slices.Equal(got, want) {
+		t.Errorf("skipped_folders = %v, want %v", result["skipped_folders"], want)
+	}
+}
+
+func TestEverySubfolderFailingFailsTheStep(t *testing.T) {
+	analysed := []string{}
+	analyzer := folderAnalyzer{failing: map[string]string{"a": "bad lockfile"}, analysed: &analysed}
+	result, status := runFolders(t, analyzer, "a/package.json", "a/yarn.lock")
+	if status != codeclarity.FAILURE {
+		t.Fatalf("status = %q, want failure", status)
+	}
+	if got := result[codeclarity.StepFailureReasonKey]; got != "bad lockfile" {
+		t.Errorf("reason = %v", got)
 	}
 }
