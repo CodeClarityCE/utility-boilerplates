@@ -380,22 +380,23 @@ func readPluginConfig() (plugin_db.Plugin, error) {
 // initializeDatabases creates all required database connections
 func initializeDatabases(configSvc *ConfigService, log logrus.FieldLogger) (*PluginDatabases, error) {
 	retry := defaultConnectRetry(log)
+	tlsOpt := buildTLSOption(&configSvc.Database, log)
 
 	// Create codeclarity database connection
-	codeclarity, err := createDatabaseConnection("codeclarity", configSvc.GetDatabaseDSN("results"), &configSvc.Database, retry)
+	codeclarity, err := createDatabaseConnection("codeclarity", configSvc.GetDatabaseDSN("results"), &configSvc.Database, tlsOpt, retry)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to codeclarity db: %w", err)
 	}
 
 	// Create knowledge database connection
-	knowledge, err := createDatabaseConnection("knowledge", configSvc.GetDatabaseDSN("knowledge"), &configSvc.Database, retry)
+	knowledge, err := createDatabaseConnection("knowledge", configSvc.GetDatabaseDSN("knowledge"), &configSvc.Database, tlsOpt, retry)
 	if err != nil {
 		codeclarity.Close()
 		return nil, fmt.Errorf("failed to connect to knowledge db: %w", err)
 	}
 
 	// Create plugins database connection
-	plugins, err := createDatabaseConnection("plugins", configSvc.GetDatabaseDSN("plugins"), &configSvc.Database, retry)
+	plugins, err := createDatabaseConnection("plugins", configSvc.GetDatabaseDSN("plugins"), &configSvc.Database, tlsOpt, retry)
 	if err != nil {
 		codeclarity.Close()
 		knowledge.Close()
@@ -412,9 +413,12 @@ func initializeDatabases(configSvc *ConfigService, log logrus.FieldLogger) (*Plu
 // buildTLSOption returns the pgdriver TLS option for the given database config.
 // This explicitly configures TLS rather than relying on pgdriver's DSN parsing,
 // which can silently fall back to non-TLS on cert loading errors.
-func buildTLSOption(dbConfig *DatabaseConfig) pgdriver.Option {
+func buildTLSOption(dbConfig *DatabaseConfig, log logrus.FieldLogger) pgdriver.Option {
 	switch dbConfig.SSLMode {
 	case "require":
+		// require encrypts without checking the certificate, as in libpq.
+		log.WithFields(logrus.Fields{"component": "postgres", "ssl_mode": "require"}).
+			Warn("Postgres TLS does not verify the server certificate in require mode; use verify-ca")
 		return pgdriver.WithTLSConfig(&tls.Config{
 			InsecureSkipVerify: true,
 		})
@@ -436,11 +440,11 @@ func buildTLSOption(dbConfig *DatabaseConfig) pgdriver.Option {
 }
 
 // createDatabaseConnection creates a new database connection with standard settings
-func createDatabaseConnection(database, dsn string, dbConfig *DatabaseConfig, retry connectRetry) (*bun.DB, error) {
+func createDatabaseConnection(database, dsn string, dbConfig *DatabaseConfig, tlsOpt pgdriver.Option, retry connectRetry) (*bun.DB, error) {
 	sqldb := sql.OpenDB(pgdriver.NewConnector(
 		pgdriver.WithDSN(dsn),
 		pgdriver.WithTimeout(dbConfig.Timeout),
-		buildTLSOption(dbConfig),
+		tlsOpt,
 	))
 
 	// Bound the connection pool (env-overridable via DB_MAX_OPEN_CONNS etc.).
