@@ -171,7 +171,7 @@ func (sb *ServiceBase) updateConnectionMetrics() {
 }
 
 func connectServiceDatabases(configSvc *ConfigService, log logrus.FieldLogger) (*ServiceDatabases, error) {
-	tlsOpt := buildTLSOption(&configSvc.Database)
+	tlsOpt := buildTLSOption(&configSvc.Database, log)
 
 	// CodeClarity Database (using sql.DB for compatibility)
 	codeClarityDSN := configSvc.GetDatabaseDSN("results")
