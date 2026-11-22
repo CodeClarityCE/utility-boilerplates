@@ -46,21 +46,21 @@ func Postgres(t testing.TB) *bun.DB {
 	pingCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	if err := admin.PingContext(pingCtx); err != nil {
-		admin.Close()
+		_ = admin.Close()
 		Unavailable(t, "postgres at "+postgresAddr(), err)
 		return nil
 	}
 
 	name := "testdeps_" + randomHex()
 	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
-		admin.Close()
+		_ = admin.Close()
 		t.Fatalf("create test database: %v", err)
 	}
 	db := bun.NewDB(openPostgres(name), pgdialect.New())
 	t.Cleanup(func() {
-		db.Close()
+		_ = db.Close()
 		_, _ = admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-		admin.Close()
+		_ = admin.Close()
 	})
 	return db
 }
@@ -74,7 +74,7 @@ func RabbitMQ(t testing.TB) string {
 		Unavailable(t, "rabbitmq at "+net.JoinHostPort(host, port), err)
 		return ""
 	}
-	conn.Close()
+	_ = conn.Close()
 	return fmt.Sprintf("%s://%s:%s@%s/",
 		env("AMQP_PROTOCOL", "amqp"),
 		url.QueryEscape(env("AMQP_USER", "guest")),

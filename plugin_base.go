@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	plugin_db "github.com/CodeClarityCE/utility-types/plugin_db"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -51,6 +49,29 @@ type AnalysisHandler interface {
 		config plugin_db.Plugin,
 		analysisDoc codeclarity.Analysis,
 	) (map[string]any, codeclarity.AnalysisStatus, error)
+}
+
+// registerHealthGauge registers the service_health_status gauge, reusing the one already
+// registered so the status a plugin sets is the one exported.
+func registerHealthGauge(logger logrus.FieldLogger) *prometheus.GaugeVec {
+	healthGauge := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "service_health_status",
+			Help: "Health status of the service (1 = healthy, 0 = unhealthy)",
+		},
+		[]string{"service", "component"},
+	)
+	if err := prometheus.Register(healthGauge); err != nil {
+		var already prometheus.AlreadyRegisteredError
+		if !errors.As(err, &already) {
+			logger.WithError(err).Warn("Failed to register the health metric")
+			return healthGauge
+		}
+		if existing, ok := already.ExistingCollector.(*prometheus.GaugeVec); ok {
+			return existing
+		}
+	}
+	return healthGauge
 }
 
 // CreatePluginBase creates a new PluginBase with all common setup handled
@@ -87,28 +108,13 @@ func CreatePluginBase() (*PluginBase, error) {
 	}
 
 	// Create health status metric
-	healthGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "service_health_status",
-			Help: "Health status of the service (1 = healthy, 0 = unhealthy)",
-		},
-		[]string{"service", "component"},
-	)
-
-	// Register the metric (ignore error if already registered)
-	prometheus.Register(healthGauge)
+	healthGauge := registerHealthGauge(logger)
 
 	// Set initial health status to healthy
 	healthGauge.WithLabelValues(config.Name, "overall").Set(1)
 
-	// Start metrics server
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		logger.WithField("port", 8080).Info("Starting metrics server")
-		if err := http.ListenAndServe(":8080", nil); err != nil {
-			logger.WithError(err).Error("Failed to start metrics server")
-		}
-	}()
+	// Serves /metrics and /health on 8080
+	StartMetricsServer("8080")
 
 	return &PluginBase{
 		Config:      config,
@@ -391,15 +397,15 @@ func initializeDatabases(configSvc *ConfigService, log logrus.FieldLogger) (*Plu
 	// Create knowledge database connection
 	knowledge, err := createDatabaseConnection("knowledge", configSvc.GetDatabaseDSN("knowledge"), &configSvc.Database, tlsOpt, retry)
 	if err != nil {
-		codeclarity.Close()
+		_ = codeclarity.Close()
 		return nil, fmt.Errorf("failed to connect to knowledge db: %w", err)
 	}
 
 	// Create plugins database connection
 	plugins, err := createDatabaseConnection("plugins", configSvc.GetDatabaseDSN("plugins"), &configSvc.Database, tlsOpt, retry)
 	if err != nil {
-		codeclarity.Close()
-		knowledge.Close()
+		_ = codeclarity.Close()
+		_ = knowledge.Close()
 		return nil, fmt.Errorf("failed to connect to plugins db: %w", err)
 	}
 
@@ -420,7 +426,7 @@ func buildTLSOption(dbConfig *DatabaseConfig, log logrus.FieldLogger) pgdriver.O
 		log.WithFields(logrus.Fields{"component": "postgres", "ssl_mode": "require"}).
 			Warn("Postgres TLS does not verify the server certificate in require mode; use verify-ca")
 		return pgdriver.WithTLSConfig(&tls.Config{
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: true, //nolint:gosec // libpq's require mode: encrypt without verifying, warned above
 		})
 	case "verify-ca", "verify-full":
 		tlsConfig := &tls.Config{
@@ -456,7 +462,7 @@ func createDatabaseConnection(database, dsn string, dbConfig *DatabaseConfig, tl
 
 	// Wait for the database, which may still be starting
 	if err := retry.pingUntilReady(database, db.PingContext); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 

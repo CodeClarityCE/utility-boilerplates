@@ -130,7 +130,7 @@ func TestFourReplicasAgainstEmptyRegistryLeaveOneRow(t *testing.T) {
 		}
 		db := openTestDB(t, database)
 		rows := registryRows(t, db, "js-sbom")
-		db.Close()
+		_ = db.Close()
 		if len(rows) != 1 {
 			t.Fatalf("round %d: want 1 registry row, got %d", round, len(rows))
 		}
