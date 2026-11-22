@@ -121,6 +121,12 @@ func TestSBOMFailureReportsAReadableReason(t *testing.T) {
 			want:     "the project source could not be found",
 		},
 		{
+			name:     "project path outside the download path",
+			analyzer: fakeAnalyzer{canAnalyze: true},
+			project:  "..",
+			want:     "the project source could not be found",
+		},
+		{
 			name:     "no manifest for the language",
 			analyzer: fakeAnalyzer{canAnalyze: false},
 			project:  "project",
