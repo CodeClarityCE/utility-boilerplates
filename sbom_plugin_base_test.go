@@ -76,7 +76,7 @@ func (a fakeAnalyzer) GetDependencyCount(SBOMOutput) int      { return 0 }
 func runHandler(t *testing.T, analyzer fakeAnalyzer, project string) (map[string]any, codeclarity.AnalysisStatus) {
 	t.Helper()
 	base := t.TempDir()
-	if err := os.Mkdir(filepath.Join(base, "project"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(base, "project"), 0o750); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("DOWNLOAD_PATH", base)
@@ -118,6 +118,12 @@ func TestSBOMFailureReportsAReadableReason(t *testing.T) {
 			name:     "missing project source",
 			analyzer: fakeAnalyzer{canAnalyze: true},
 			project:  "does-not-exist",
+			want:     "the project source could not be found",
+		},
+		{
+			name:     "project path outside the download path",
+			analyzer: fakeAnalyzer{canAnalyze: true},
+			project:  "..",
 			want:     "the project source could not be found",
 		},
 		{
@@ -225,10 +231,10 @@ func runFolders(t *testing.T, analyzer folderAnalyzer, files ...string) (map[str
 	base := t.TempDir()
 	for _, f := range files {
 		path := filepath.Join(base, "project", f)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
