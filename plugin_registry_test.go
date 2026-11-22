@@ -262,3 +262,30 @@ func TestMixedVersionReplicasStartingTogetherKeepTheNewest(t *testing.T) {
 		}
 	}
 }
+
+func TestTheRegistryKeepsTheNewestOfMixedAlphaAndBetaVersions(t *testing.T) {
+	// Each pair is {newer, older}; both registration orders must leave the newer one.
+	pairs := [][2]string{
+		{"v0.0.27-beta", "v0.0.27-alpha"},
+		{"v0.0.28-alpha", "v0.0.27-beta"},
+		{"v0.0.10-beta", "v0.0.9-alpha"},
+		{"v0.1.0", "v0.1.0-beta"},
+		{"v1.0.0-beta.10", "v1.0.0-beta.9"},
+	}
+	for _, pair := range pairs {
+		for _, order := range [][2]string{{pair[0], pair[1]}, {pair[1], pair[0]}} {
+			t.Run(order[0]+" then "+order[1], func(t *testing.T) {
+				db := openTestDB(t, scratchRegistry(t, true))
+				defer db.Close()
+				for _, v := range order {
+					if err := registerPlugin(testPluginConfig(v), db); err != nil {
+						t.Fatalf("register %s: %v", v, err)
+					}
+				}
+				if got := registryRows(t, db, "js-sbom")[0].Version; got != pair[0] {
+					t.Errorf("want %s registered, got %s", pair[0], got)
+				}
+			})
+		}
+	}
+}

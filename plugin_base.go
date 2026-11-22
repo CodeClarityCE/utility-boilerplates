@@ -463,10 +463,21 @@ func createDatabaseConnection(database, dsn string, dbConfig *DatabaseConfig, tl
 	return db, nil
 }
 
-// versionKey turns a version column into its numbers in order, e.g. {0,0,27} for v0.0.27-alpha.
+// sqlNumbers turns a text expression into its numbers in order, e.g. {0,0,27} for v0.0.27.
+func sqlNumbers(expr string) string {
+	return "(SELECT coalesce(array_agg(m[1]::numeric ORDER BY n), '{}') FROM regexp_matches(" +
+		expr + ", '\\d+', 'g') WITH ORDINALITY AS t(m, n))"
+}
+
+// versionKey turns a version column into a sortable row, semver style: core numbers,
+// then a release above any prerelease, then the prerelease label (alpha < beta) and its numbers.
+// v0.0.27-beta.2 becomes ({0,0,27}, false, 'beta.', {2}).
 func versionKey(column string) string {
-	return "(SELECT coalesce(array_agg(m[1]::numeric ORDER BY n), '{}') FROM regexp_matches(coalesce(" +
-		column + ", ''), '\\d+', 'g') WITH ORDINALITY AS t(m, n))"
+	v := "split_part(coalesce(" + column + ", ''), '+', 1)"
+	core := "split_part(" + v + ", '-', 1)"
+	pre := "coalesce(substring(" + v + " from '-(.*)$'), '')"
+	return "ROW(" + sqlNumbers(core) + ", " + pre + " = '', " +
+		"regexp_replace(" + pre + ", '\\d+', '', 'g') COLLATE \"C\", " + sqlNumbers(pre) + ")"
 }
 
 // registerPlugin records the plugin in the plugins database, one row per name.
