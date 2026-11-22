@@ -325,10 +325,19 @@ func (h *GenericSBOMHandler) extractProjectPath(analysisDoc codeclarity.Analysis
 		return "", fmt.Errorf("project path not provided in analysis configuration")
 	}
 
-	projectPath := basePath + "/" + projectInterface.(string)
+	project, ok := projectInterface.(string)
+	if !ok {
+		return "", fmt.Errorf("project path in analysis configuration is not a string")
+	}
+	projectPath := filepath.Join(basePath, project)
+
+	// Reject paths such as "../x" that leave the download directory.
+	if rel, err := filepath.Rel(basePath, projectPath); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("project path %q is outside the download path", project)
+	}
 
 	// Validate project path exists
-	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
+	if _, err := os.Stat(projectPath); os.IsNotExist(err) { //nolint:gosec // projectPath is checked to stay inside the download path above
 		return "", fmt.Errorf("project path does not exist: %s", projectPath)
 	}
 

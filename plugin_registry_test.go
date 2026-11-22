@@ -3,12 +3,12 @@ package boilerplates
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/CodeClarityCE/utility-boilerplates/testdeps"
 	plugin_db "github.com/CodeClarityCE/utility-types/plugin_db"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -26,12 +26,13 @@ func testPgEnv(key, fallback string) string {
 	return fallback
 }
 
+// openTestDB opens another connection pool on a database of the testdeps server.
 func openTestDB(t *testing.T, database string) *bun.DB {
 	t.Helper()
 	sqldb := sql.OpenDB(pgdriver.NewConnector(
-		pgdriver.WithAddr(testPgEnv("TEST_PG_HOST", "localhost")+":"+testPgEnv("TEST_PG_PORT", "5432")),
-		pgdriver.WithUser(testPgEnv("TEST_PG_USER", "postgres")),
-		pgdriver.WithPassword(testPgEnv("TEST_PG_PASSWORD", "!ChangeMe!")),
+		pgdriver.WithAddr(testPgEnv("PG_DB_HOST", "127.0.0.1")+":"+testPgEnv("PG_DB_PORT", "5432")),
+		pgdriver.WithUser(testPgEnv("PG_DB_USER", "postgres")),
+		pgdriver.WithPassword(testPgEnv("PG_DB_PASSWORD", "!ChangeMe!")),
 		pgdriver.WithDatabase(database),
 		pgdriver.WithInsecure(true),
 		pgdriver.WithTimeout(5*time.Second),
@@ -40,27 +41,10 @@ func openTestDB(t *testing.T, database string) *bun.DB {
 }
 
 // scratchRegistry creates a throwaway plugins database and returns its name.
-// The test is skipped when no Postgres is reachable.
 func scratchRegistry(t *testing.T, unique bool) string {
 	t.Helper()
-	admin := openTestDB(t, "postgres")
-	defer admin.Close()
+	db := testdeps.Postgres(t)
 	ctx := context.Background()
-	if err := admin.PingContext(ctx); err != nil {
-		t.Skipf("no Postgres reachable for registry tests: %v", err)
-	}
-	name := fmt.Sprintf("test_plugin_registry_%d_%d", os.Getpid(), time.Now().UnixNano())
-	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatalf("create scratch database: %v", err)
-	}
-	t.Cleanup(func() {
-		a := openTestDB(t, "postgres")
-		defer a.Close()
-		_, _ = a.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-	})
-
-	db := openTestDB(t, name)
-	defer db.Close()
 	stmts := []string{`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`, pluginTableDDL}
 	if unique {
 		stmts = append(stmts, pluginUniqueNameDDL)
@@ -69,6 +53,10 @@ func scratchRegistry(t *testing.T, unique bool) string {
 		if _, err := db.ExecContext(ctx, s); err != nil {
 			t.Fatalf("prepare registry schema: %v", err)
 		}
+	}
+	var name string
+	if err := db.QueryRowContext(ctx, "SELECT current_database()").Scan(&name); err != nil {
+		t.Fatalf("read scratch database name: %v", err)
 	}
 	return name
 }
@@ -130,7 +118,7 @@ func TestFourReplicasAgainstEmptyRegistryLeaveOneRow(t *testing.T) {
 		}
 		db := openTestDB(t, database)
 		rows := registryRows(t, db, "js-sbom")
-		db.Close()
+		_ = db.Close()
 		if len(rows) != 1 {
 			t.Fatalf("round %d: want 1 registry row, got %d", round, len(rows))
 		}
@@ -259,6 +247,33 @@ func TestMixedVersionReplicasStartingTogetherKeepTheNewest(t *testing.T) {
 		rows := registryRows(t, dbs[0], "js-sbom")
 		if len(rows) != 1 || rows[0].Version != "1.1.0" {
 			t.Fatalf("round %d: want one 1.1.0 row, got %+v", round, rows)
+		}
+	}
+}
+
+func TestTheRegistryKeepsTheNewestOfMixedAlphaAndBetaVersions(t *testing.T) {
+	// Each pair is {newer, older}; both registration orders must leave the newer one.
+	pairs := [][2]string{
+		{"v0.0.27-beta", "v0.0.27-alpha"},
+		{"v0.0.28-alpha", "v0.0.27-beta"},
+		{"v0.0.10-beta", "v0.0.9-alpha"},
+		{"v0.1.0", "v0.1.0-beta"},
+		{"v1.0.0-beta.10", "v1.0.0-beta.9"},
+	}
+	for _, pair := range pairs {
+		for _, order := range [][2]string{{pair[0], pair[1]}, {pair[1], pair[0]}} {
+			t.Run(order[0]+" then "+order[1], func(t *testing.T) {
+				db := openTestDB(t, scratchRegistry(t, true))
+				defer db.Close()
+				for _, v := range order {
+					if err := registerPlugin(testPluginConfig(v), db); err != nil {
+						t.Fatalf("register %s: %v", v, err)
+					}
+				}
+				if got := registryRows(t, db, "js-sbom")[0].Version; got != pair[0] {
+					t.Errorf("want %s registered, got %s", pair[0], got)
+				}
+			})
 		}
 	}
 }
