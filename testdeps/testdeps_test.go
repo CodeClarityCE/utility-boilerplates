@@ -2,13 +2,16 @@ package testdeps_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 
+	boilerplates "github.com/CodeClarityCE/utility-boilerplates"
 	"github.com/CodeClarityCE/utility-boilerplates/testdeps"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 // Set in the child process that runs one dependency test on its own.
@@ -118,4 +121,65 @@ func TestRabbitMQURLOpensAConnection(t *testing.T) {
 		t.Fatalf("dial the returned URL: %v", err)
 	}
 	conn.Close()
+}
+
+func TestServiceDatabasesAreWhereAServiceConnects(t *testing.T) {
+	ctx := context.Background()
+	db := testdeps.ServiceDatabases(t)
+
+	config, err := boilerplates.CreateConfigService()
+	if err != nil {
+		t.Fatalf("create config service: %v", err)
+	}
+	var want string
+	if err := db.QueryRowContext(ctx, "SELECT current_database()").Scan(&want); err != nil {
+		t.Fatalf("read test database name: %v", err)
+	}
+	for _, name := range []string{"results", "knowledge", "plugins", "config"} {
+		conn := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(config.GetDatabaseDSN(name))))
+		var got string
+		err := conn.QueryRowContext(ctx, "SELECT current_database()").Scan(&got)
+		_ = conn.Close()
+		if err != nil {
+			t.Fatalf("query %s: %v", name, err)
+		}
+		if got != want {
+			t.Errorf("%s connects to %q, want the test database %q", name, got, want)
+		}
+	}
+}
+
+func TestPostgresDSNOpensOneDatabaseFromManyPools(t *testing.T) {
+	ctx := context.Background()
+	dsn := testdeps.PostgresDSN(t)
+
+	first := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	defer first.Close()
+	second := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	defer second.Close()
+	if _, err := first.ExecContext(ctx, "CREATE TABLE marker (id int)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	var count int
+	if err := second.QueryRowContext(ctx, "SELECT count(*) FROM pg_tables WHERE tablename = 'marker'").Scan(&count); err != nil {
+		t.Fatalf("query second pool: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("want both pools on the same database, the second does not see the table")
+	}
+}
+
+func TestChildUnreachablePostgresDSN(t *testing.T) {
+	if os.Getenv(childEnv) == "" {
+		t.Skip("runs only as a child of the tests below")
+	}
+	testdeps.PostgresDSN(t)
+}
+
+func TestUnreachablePostgresDSNFailsInCI(t *testing.T) {
+	out, err := runChild(t, "TestChildUnreachablePostgresDSN", "CI=true", "PG_DB_HOST=127.0.0.1", "PG_DB_PORT=1")
+
+	if err == nil || !strings.Contains(out, "--- FAIL") {
+		t.Fatalf("want the test to fail in CI, got err=%v and output:\n%s", err, out)
+	}
 }

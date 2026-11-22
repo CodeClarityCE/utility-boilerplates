@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   go:
-    uses: CodeClarityCE/.github/.github/workflows/go-library.yml@v1
+    uses: CodeClarityCE/.github/.github/workflows/go-library.yml@spec/312-beta
     permissions:
       contents: write # release job only; it runs on main when CI_RELEASE is true
 
