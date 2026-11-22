@@ -20,7 +20,7 @@ const childEnv = "TESTDEPS_CHILD"
 // runChild runs the named test of this package in a new process with the given extra env.
 func runChild(t *testing.T, name string, env ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^"+name+"$", "-test.v")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+name+"$", "-test.v") //nolint:gosec // re-runs this test binary with a test name from this file
 	cmd.Env = append(withoutCI(os.Environ()), append([]string{childEnv + "=1"}, env...)...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -120,7 +120,7 @@ func TestRabbitMQURLOpensAConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial the returned URL: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 }
 
 func TestServiceDatabasesAreWhereAServiceConnects(t *testing.T) {

@@ -144,25 +144,25 @@ func (sb *ServiceBase) updateConnectionMetrics() {
 	// Update database connection metrics
 	if sb.DB != nil {
 		if sb.DB.CodeClarity != nil {
-			stats := sb.DB.CodeClarity.DB.Stats()
+			stats := sb.DB.CodeClarity.Stats()
 			sb.Metrics.DatabaseConnections.WithLabelValues("codeclarity", "open").Set(float64(stats.OpenConnections))
 			sb.Metrics.DatabaseConnections.WithLabelValues("codeclarity", "idle").Set(float64(stats.Idle))
 			sb.Metrics.DatabaseConnections.WithLabelValues("codeclarity", "in_use").Set(float64(stats.InUse))
 		}
 		if sb.DB.Knowledge != nil {
-			stats := sb.DB.Knowledge.DB.Stats()
+			stats := sb.DB.Knowledge.Stats()
 			sb.Metrics.DatabaseConnections.WithLabelValues("knowledge", "open").Set(float64(stats.OpenConnections))
 			sb.Metrics.DatabaseConnections.WithLabelValues("knowledge", "idle").Set(float64(stats.Idle))
 			sb.Metrics.DatabaseConnections.WithLabelValues("knowledge", "in_use").Set(float64(stats.InUse))
 		}
 		if sb.DB.Config != nil {
-			stats := sb.DB.Config.DB.Stats()
+			stats := sb.DB.Config.Stats()
 			sb.Metrics.DatabaseConnections.WithLabelValues("config", "open").Set(float64(stats.OpenConnections))
 			sb.Metrics.DatabaseConnections.WithLabelValues("config", "idle").Set(float64(stats.Idle))
 			sb.Metrics.DatabaseConnections.WithLabelValues("config", "in_use").Set(float64(stats.InUse))
 		}
 		if sb.DB.Plugins != nil {
-			stats := sb.DB.Plugins.DB.Stats()
+			stats := sb.DB.Plugins.Stats()
 			sb.Metrics.DatabaseConnections.WithLabelValues("plugins", "open").Set(float64(stats.OpenConnections))
 			sb.Metrics.DatabaseConnections.WithLabelValues("plugins", "idle").Set(float64(stats.Idle))
 			sb.Metrics.DatabaseConnections.WithLabelValues("plugins", "in_use").Set(float64(stats.InUse))
@@ -182,7 +182,7 @@ func connectServiceDatabases(configSvc *ConfigService, log logrus.FieldLogger) (
 
 	// Wait for the database, which may still be starting
 	if err := defaultConnectRetry(log).pingUntilReady("codeclarity", codeClaritySqlDB.PingContext); err != nil {
-		codeClaritySqlDB.Close()
+		_ = codeClaritySqlDB.Close()
 		return nil, fmt.Errorf("codeclarity %w", err)
 	}
 
@@ -230,7 +230,7 @@ func amqpConnectMaxWait() time.Duration {
 	}
 	secs, err := strconv.Atoi(v)
 	if err != nil || secs <= 0 {
-		log.Printf("[amqp] invalid AMQP_CONNECT_MAX_WAIT_SECONDS=%q, using default %s", v, def)
+		log.Printf("[amqp] invalid AMQP_CONNECT_MAX_WAIT_SECONDS=%q, using default %s", v, def) //nolint:gosec // %q escapes the value
 		return def
 	}
 	return time.Duration(secs) * time.Second
@@ -299,7 +299,7 @@ func (sb *ServiceBase) startQueueListener(config QueueConfig) error {
 		return err
 	}
 	sb.channels[config.Name] = ch
-	go sb.consumeQueue(config, ch, msgs)
+	go sb.consumeQueue(config, msgs)
 	return nil
 }
 
@@ -325,7 +325,7 @@ func (sb *ServiceBase) subscribeQueue(config QueueConfig) (*amqp.Channel, <-chan
 		false, // global - apply per consumer
 	)
 	if err != nil {
-		ch.Close()
+		_ = ch.Close()
 		return nil, nil, fmt.Errorf("failed to set QoS: %w", err)
 	}
 
@@ -338,7 +338,7 @@ func (sb *ServiceBase) subscribeQueue(config QueueConfig) (*amqp.Channel, <-chan
 		nil,            // arguments - remove queue limits for compatibility
 	)
 	if err != nil {
-		ch.Close()
+		_ = ch.Close()
 		return nil, nil, fmt.Errorf("failed to declare queue: %w", err)
 	}
 
@@ -352,7 +352,7 @@ func (sb *ServiceBase) subscribeQueue(config QueueConfig) (*amqp.Channel, <-chan
 		nil,    // args
 	)
 	if err != nil {
-		ch.Close()
+		_ = ch.Close()
 		return nil, nil, fmt.Errorf("failed to register consumer: %w", err)
 	}
 	return ch, msgs, nil
@@ -362,7 +362,14 @@ func (sb *ServiceBase) subscribeQueue(config QueueConfig) (*amqp.Channel, <-chan
 // channel out from under us, re-subscribes with backoff instead of dying. It
 // exits only when the underlying connection is closed — full-connection drops
 // are the connection monitor's job, not ours.
-func (sb *ServiceBase) consumeQueue(config QueueConfig, ch *amqp.Channel, msgs <-chan amqp.Delivery) {
+// logAckError logs a failed ack or nack; the broker redelivers the message once the channel closes.
+func logAckError(queue, op string, err error) {
+	if err != nil {
+		logrus.WithFields(logrus.Fields{"queue": queue, "error": err}).Warnf("Failed to %s delivery", op)
+	}
+}
+
+func (sb *ServiceBase) consumeQueue(config QueueConfig, msgs <-chan amqp.Delivery) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("Queue %s handler panicked: %v", config.Name, r)
@@ -392,9 +399,9 @@ func (sb *ServiceBase) consumeQueue(config QueueConfig, ch *amqp.Channel, msgs <
 						// give a transient failure one retry without looping.
 						if d.Redelivered {
 							log.Printf("Queue %s: dropping poison message after redelivery: %v", config.Name, r)
-							d.Nack(false, false) // drop (dead-letter if a DLX is configured)
+							logAckError(config.Name, "nack", d.Nack(false, false)) // drop (dead-letter if a DLX is configured)
 						} else {
-							d.Nack(false, true) // first failure: requeue once
+							logAckError(config.Name, "nack", d.Nack(false, true)) // first failure: requeue once
 						}
 						return
 					}
@@ -402,7 +409,7 @@ func (sb *ServiceBase) consumeQueue(config QueueConfig, ch *amqp.Channel, msgs <
 
 				config.Handler(d)
 				duration := time.Since(start)
-				d.Ack(false) // Acknowledge successful processing
+				logAckError(config.Name, "ack", d.Ack(false)) // Acknowledge successful processing
 				sb.Metrics.RecordMessageProcessed(config.Name, "success", duration)
 				logrus.WithFields(logrus.Fields{
 					"queue":    config.Name,
@@ -423,7 +430,7 @@ func (sb *ServiceBase) consumeQueue(config QueueConfig, ch *amqp.Channel, msgs <
 			newCh, newMsgs, err := sb.subscribeQueue(config)
 			if err == nil {
 				sb.channels[config.Name] = newCh
-				ch, msgs = newCh, newMsgs
+				msgs = newMsgs
 				log.Printf("Queue %s consumer re-subscribed", config.Name)
 				break
 			}
@@ -638,7 +645,7 @@ func (sb *ServiceBase) checkDatabaseHealth() error {
 		start := time.Now()
 		done := make(chan error, 1)
 		go func() {
-			done <- sb.DB.CodeClarity.DB.Ping()
+			done <- sb.DB.CodeClarity.Ping()
 		}()
 
 		select {
@@ -662,7 +669,7 @@ func (sb *ServiceBase) checkDatabaseHealth() error {
 	if sb.DB.Knowledge != nil {
 		done := make(chan error, 1)
 		go func() {
-			done <- sb.DB.Knowledge.DB.Ping()
+			done <- sb.DB.Knowledge.Ping()
 		}()
 
 		select {
@@ -678,7 +685,7 @@ func (sb *ServiceBase) checkDatabaseHealth() error {
 	if sb.DB.Plugins != nil {
 		done := make(chan error, 1)
 		go func() {
-			done <- sb.DB.Plugins.DB.Ping()
+			done <- sb.DB.Plugins.Ping()
 		}()
 
 		select {
@@ -694,7 +701,7 @@ func (sb *ServiceBase) checkDatabaseHealth() error {
 	if sb.DB.Config != nil {
 		done := make(chan error, 1)
 		go func() {
-			done <- sb.DB.Config.DB.Ping()
+			done <- sb.DB.Config.Ping()
 		}()
 
 		select {
