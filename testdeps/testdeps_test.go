@@ -139,7 +139,7 @@ func TestServiceDatabasesAreWhereAServiceConnects(t *testing.T) {
 		conn := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(config.GetDatabaseDSN(name))))
 		var got string
 		err := conn.QueryRowContext(ctx, "SELECT current_database()").Scan(&got)
-		conn.Close()
+		_ = conn.Close()
 		if err != nil {
 			t.Fatalf("query %s: %v", name, err)
 		}

@@ -47,7 +47,7 @@ func Postgres(t testing.TB) *bun.DB {
 		return nil
 	}
 	db := bun.NewDB(openPostgres(name), pgdialect.New())
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
