@@ -230,7 +230,7 @@ func amqpConnectMaxWait() time.Duration {
 	}
 	secs, err := strconv.Atoi(v)
 	if err != nil || secs <= 0 {
-		log.Printf("[amqp] invalid AMQP_CONNECT_MAX_WAIT_SECONDS=%q, using default %s", v, def) //nolint:gosec // %q escapes the value
+		logrus.WithFields(logrus.Fields{"value": v, "default": def.String()}).Warn("Invalid AMQP_CONNECT_MAX_WAIT_SECONDS, using the default")
 		return def
 	}
 	return time.Duration(secs) * time.Second
@@ -358,10 +358,6 @@ func (sb *ServiceBase) subscribeQueue(config QueueConfig) (*amqp.Channel, <-chan
 	return ch, msgs, nil
 }
 
-// consumeQueue drains deliveries serially and, when the broker closes the
-// channel out from under us, re-subscribes with backoff instead of dying. It
-// exits only when the underlying connection is closed — full-connection drops
-// are the connection monitor's job, not ours.
 // logAckError logs a failed ack or nack; the broker redelivers the message once the channel closes.
 func logAckError(queue, op string, err error) {
 	if err != nil {
@@ -369,6 +365,10 @@ func logAckError(queue, op string, err error) {
 	}
 }
 
+// consumeQueue drains deliveries serially and, when the broker closes the
+// channel out from under us, re-subscribes with backoff instead of dying. It
+// exits only when the underlying connection is closed — full-connection drops
+// are the connection monitor's job, not ours.
 func (sb *ServiceBase) consumeQueue(config QueueConfig, msgs <-chan amqp.Delivery) {
 	defer func() {
 		if r := recover(); r != nil {
