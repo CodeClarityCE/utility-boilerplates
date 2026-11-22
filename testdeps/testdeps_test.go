@@ -2,6 +2,7 @@ package testdeps_test
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"os/exec"
 	"strings"
@@ -10,7 +11,7 @@ import (
 	boilerplates "github.com/CodeClarityCE/utility-boilerplates"
 	"github.com/CodeClarityCE/utility-boilerplates/testdeps"
 	amqp "github.com/rabbitmq/amqp091-go"
-	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/driver/pgdriver"
 )
 
 // Set in the child process that runs one dependency test on its own.
@@ -122,26 +123,24 @@ func TestRabbitMQURLOpensAConnection(t *testing.T) {
 	conn.Close()
 }
 
-func TestServiceDatabasesLetAServiceBaseConnect(t *testing.T) {
+func TestServiceDatabasesAreWhereAServiceConnects(t *testing.T) {
 	ctx := context.Background()
 	db := testdeps.ServiceDatabases(t)
-	testdeps.RabbitMQ(t)
 
-	base, err := boilerplates.CreateServiceBaseWithName("testdeps")
+	config, err := boilerplates.CreateConfigService()
 	if err != nil {
-		t.Fatalf("create service base: %v", err)
+		t.Fatalf("create config service: %v", err)
 	}
-	defer base.Close()
-
-	var want, got string
+	var want string
 	if err := db.QueryRowContext(ctx, "SELECT current_database()").Scan(&want); err != nil {
 		t.Fatalf("read test database name: %v", err)
 	}
-	for name, conn := range map[string]*bun.DB{
-		"codeclarity": base.DB.CodeClarity, "knowledge": base.DB.Knowledge,
-		"plugins": base.DB.Plugins, "config": base.DB.Config,
-	} {
-		if err := conn.QueryRowContext(ctx, "SELECT current_database()").Scan(&got); err != nil {
+	for _, name := range []string{"results", "knowledge", "plugins", "config"} {
+		conn := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(config.GetDatabaseDSN(name))))
+		var got string
+		err := conn.QueryRowContext(ctx, "SELECT current_database()").Scan(&got)
+		conn.Close()
+		if err != nil {
 			t.Fatalf("query %s: %v", name, err)
 		}
 		if got != want {
