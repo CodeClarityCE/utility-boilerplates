@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	dbhelper "github.com/CodeClarityCE/utility-dbhelper/helper"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -62,6 +63,32 @@ func Postgres(t testing.TB) *bun.DB {
 		_, _ = admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
 		admin.Close()
 	})
+	return db
+}
+
+// ServiceDatabases points the codeclarity, knowledge, plugins and config database names
+// at one new test database, so CreateServiceBase connects to it, and returns it.
+func ServiceDatabases(t testing.TB) *bun.DB {
+	t.Helper()
+	db := Postgres(t)
+	if db == nil {
+		return nil
+	}
+	var name string
+	if err := db.QueryRowContext(context.Background(), "SELECT current_database()").Scan(&name); err != nil {
+		t.Fatalf("read test database name: %v", err)
+	}
+	// The service config requires every PG_DB_* variable; fill in the ones Postgres defaulted.
+	for key, fallback := range map[string]string{
+		"PG_DB_HOST": "127.0.0.1", "PG_DB_PORT": "5432", "PG_DB_USER": "postgres", "PG_DB_PASSWORD": "!ChangeMe!",
+	} {
+		if os.Getenv(key) == "" {
+			t.Setenv(key, fallback)
+		}
+	}
+	saved := dbhelper.Config.Database
+	dbhelper.Config.Database = dbhelper.Database{Results: name, Knowledge: name, Plugins: name, Config: name}
+	t.Cleanup(func() { dbhelper.Config.Database = saved })
 	return db
 }
 

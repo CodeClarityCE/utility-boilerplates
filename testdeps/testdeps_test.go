@@ -7,8 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	boilerplates "github.com/CodeClarityCE/utility-boilerplates"
 	"github.com/CodeClarityCE/utility-boilerplates/testdeps"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/uptrace/bun"
 )
 
 // Set in the child process that runs one dependency test on its own.
@@ -118,4 +120,32 @@ func TestRabbitMQURLOpensAConnection(t *testing.T) {
 		t.Fatalf("dial the returned URL: %v", err)
 	}
 	conn.Close()
+}
+
+func TestServiceDatabasesLetAServiceBaseConnect(t *testing.T) {
+	ctx := context.Background()
+	db := testdeps.ServiceDatabases(t)
+	testdeps.RabbitMQ(t)
+
+	base, err := boilerplates.CreateServiceBaseWithName("testdeps")
+	if err != nil {
+		t.Fatalf("create service base: %v", err)
+	}
+	defer base.Close()
+
+	var want, got string
+	if err := db.QueryRowContext(ctx, "SELECT current_database()").Scan(&want); err != nil {
+		t.Fatalf("read test database name: %v", err)
+	}
+	for name, conn := range map[string]*bun.DB{
+		"codeclarity": base.DB.CodeClarity, "knowledge": base.DB.Knowledge,
+		"plugins": base.DB.Plugins, "config": base.DB.Config,
+	} {
+		if err := conn.QueryRowContext(ctx, "SELECT current_database()").Scan(&got); err != nil {
+			t.Fatalf("query %s: %v", name, err)
+		}
+		if got != want {
+			t.Errorf("%s connects to %q, want the test database %q", name, got, want)
+		}
+	}
 }
