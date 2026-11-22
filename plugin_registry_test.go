@@ -3,12 +3,12 @@ package boilerplates
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"os"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/CodeClarityCE/utility-boilerplates/testdeps"
 	plugin_db "github.com/CodeClarityCE/utility-types/plugin_db"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
@@ -26,12 +26,13 @@ func testPgEnv(key, fallback string) string {
 	return fallback
 }
 
+// openTestDB opens another connection pool on a database of the testdeps server.
 func openTestDB(t *testing.T, database string) *bun.DB {
 	t.Helper()
 	sqldb := sql.OpenDB(pgdriver.NewConnector(
-		pgdriver.WithAddr(testPgEnv("TEST_PG_HOST", "localhost")+":"+testPgEnv("TEST_PG_PORT", "5432")),
-		pgdriver.WithUser(testPgEnv("TEST_PG_USER", "postgres")),
-		pgdriver.WithPassword(testPgEnv("TEST_PG_PASSWORD", "!ChangeMe!")),
+		pgdriver.WithAddr(testPgEnv("PG_DB_HOST", "127.0.0.1")+":"+testPgEnv("PG_DB_PORT", "5432")),
+		pgdriver.WithUser(testPgEnv("PG_DB_USER", "postgres")),
+		pgdriver.WithPassword(testPgEnv("PG_DB_PASSWORD", "!ChangeMe!")),
 		pgdriver.WithDatabase(database),
 		pgdriver.WithInsecure(true),
 		pgdriver.WithTimeout(5*time.Second),
@@ -40,27 +41,10 @@ func openTestDB(t *testing.T, database string) *bun.DB {
 }
 
 // scratchRegistry creates a throwaway plugins database and returns its name.
-// The test is skipped when no Postgres is reachable.
 func scratchRegistry(t *testing.T, unique bool) string {
 	t.Helper()
-	admin := openTestDB(t, "postgres")
-	defer admin.Close()
+	db := testdeps.Postgres(t)
 	ctx := context.Background()
-	if err := admin.PingContext(ctx); err != nil {
-		t.Skipf("no Postgres reachable for registry tests: %v", err)
-	}
-	name := fmt.Sprintf("test_plugin_registry_%d_%d", os.Getpid(), time.Now().UnixNano())
-	if _, err := admin.ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
-		t.Fatalf("create scratch database: %v", err)
-	}
-	t.Cleanup(func() {
-		a := openTestDB(t, "postgres")
-		defer a.Close()
-		_, _ = a.ExecContext(context.Background(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
-	})
-
-	db := openTestDB(t, name)
-	defer db.Close()
 	stmts := []string{`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`, pluginTableDDL}
 	if unique {
 		stmts = append(stmts, pluginUniqueNameDDL)
@@ -69,6 +53,10 @@ func scratchRegistry(t *testing.T, unique bool) string {
 		if _, err := db.ExecContext(ctx, s); err != nil {
 			t.Fatalf("prepare registry schema: %v", err)
 		}
+	}
+	var name string
+	if err := db.QueryRowContext(ctx, "SELECT current_database()").Scan(&name); err != nil {
+		t.Fatalf("read scratch database name: %v", err)
 	}
 	return name
 }
