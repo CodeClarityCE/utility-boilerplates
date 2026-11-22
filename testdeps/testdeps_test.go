@@ -148,3 +148,38 @@ func TestServiceDatabasesAreWhereAServiceConnects(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresDSNOpensOneDatabaseFromManyPools(t *testing.T) {
+	ctx := context.Background()
+	dsn := testdeps.PostgresDSN(t)
+
+	first := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	defer first.Close()
+	second := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn)))
+	defer second.Close()
+	if _, err := first.ExecContext(ctx, "CREATE TABLE marker (id int)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	var count int
+	if err := second.QueryRowContext(ctx, "SELECT count(*) FROM pg_tables WHERE tablename = 'marker'").Scan(&count); err != nil {
+		t.Fatalf("query second pool: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("want both pools on the same database, the second does not see the table")
+	}
+}
+
+func TestChildUnreachablePostgresDSN(t *testing.T) {
+	if os.Getenv(childEnv) == "" {
+		t.Skip("runs only as a child of the tests below")
+	}
+	testdeps.PostgresDSN(t)
+}
+
+func TestUnreachablePostgresDSNFailsInCI(t *testing.T) {
+	out, err := runChild(t, "TestChildUnreachablePostgresDSN", "CI=true", "PG_DB_HOST=127.0.0.1", "PG_DB_PORT=1")
+
+	if err == nil || !strings.Contains(out, "--- FAIL") {
+		t.Fatalf("want the test to fail in CI, got err=%v and output:\n%s", err, out)
+	}
+}

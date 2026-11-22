@@ -42,6 +42,28 @@ func Unavailable(t testing.TB, dependency string, err error) {
 // and drops it when the test ends.
 func Postgres(t testing.TB) *bun.DB {
 	t.Helper()
+	name, ok := createDatabase(t)
+	if !ok {
+		return nil
+	}
+	db := bun.NewDB(openPostgres(name), pgdialect.New())
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// PostgresDSN is Postgres for tests that open their own pools: it returns the new database's DSN.
+func PostgresDSN(t testing.TB) string {
+	t.Helper()
+	name, ok := createDatabase(t)
+	if !ok {
+		return ""
+	}
+	return postgresDSN(name)
+}
+
+// createDatabase creates a test database and drops it, closing any open connections, when the test ends.
+func createDatabase(t testing.TB) (string, bool) {
+	t.Helper()
 	ctx := context.Background()
 	admin := openPostgres("postgres")
 	pingCtx, cancel := context.WithTimeout(ctx, dialTimeout)
@@ -49,7 +71,7 @@ func Postgres(t testing.TB) *bun.DB {
 	if err := admin.PingContext(pingCtx); err != nil {
 		admin.Close()
 		Unavailable(t, "postgres at "+postgresAddr(), err)
-		return nil
+		return "", false
 	}
 
 	name := "testdeps_" + randomHex()
@@ -57,13 +79,11 @@ func Postgres(t testing.TB) *bun.DB {
 		admin.Close()
 		t.Fatalf("create test database: %v", err)
 	}
-	db := bun.NewDB(openPostgres(name), pgdialect.New())
 	t.Cleanup(func() {
-		db.Close()
 		_, _ = admin.ExecContext(ctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
 		admin.Close()
 	})
-	return db
+	return name, true
 }
 
 // ServiceDatabases points the codeclarity, knowledge, plugins and config database names
@@ -110,12 +130,15 @@ func RabbitMQ(t testing.TB) string {
 }
 
 func openPostgres(database string) *sql.DB {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+	return sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(postgresDSN(database)), pgdriver.WithDialTimeout(dialTimeout)))
+}
+
+func postgresDSN(database string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
 		url.QueryEscape(env("PG_DB_USER", "postgres")),
 		url.QueryEscape(env("PG_DB_PASSWORD", "!ChangeMe!")),
 		postgresAddr(),
 		database)
-	return sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(dsn), pgdriver.WithDialTimeout(dialTimeout)))
 }
 
 func postgresAddr() string {
