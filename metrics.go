@@ -1,7 +1,9 @@
 package boilerplates
 
 import (
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -206,10 +208,18 @@ func (m *ServiceMetrics) SetAMQPConnections(connectionType string, count int) {
 	m.AMQPConnections.WithLabelValues(connectionType).Set(float64(count))
 }
 
-var metricsServerStarted bool
+// Guards the one metrics server a process runs
+var (
+	metricsServerMu      sync.Mutex
+	metricsServerStarted bool
+)
 
-// StartMetricsServer starts the Prometheus metrics HTTP server
+// StartMetricsServer starts the Prometheus metrics HTTP server once per process.
+// It is safe to call concurrently; a failed bind leaves it free to try again.
 func StartMetricsServer(port string) {
+	metricsServerMu.Lock()
+	defer metricsServerMu.Unlock()
+
 	if metricsServerStarted {
 		logrus.WithField("port", port).Debug("Metrics server already started, skipping")
 		return
@@ -232,12 +242,20 @@ func StartMetricsServer(port string) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Bind here so a failed bind is known before the next call
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		logrus.WithError(err).WithField("port", port).Error("Metrics server failed")
+		return
+	}
 	metricsServerStarted = true
 
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			logrus.WithError(err).Error("Metrics server failed")
+			metricsServerMu.Lock()
 			metricsServerStarted = false
+			metricsServerMu.Unlock()
 		}
 	}()
 }
