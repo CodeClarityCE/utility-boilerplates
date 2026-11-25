@@ -245,7 +245,7 @@ func StartMetricsServer(port string) {
 	// Bind here so a failed bind is known before the next call
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
-		logrus.WithError(err).WithField("port", port).Error("Metrics server failed")
+		logrus.WithError(err).WithField("port", port).Error("Metrics server could not bind its port")
 		return
 	}
 	metricsServerStarted = true

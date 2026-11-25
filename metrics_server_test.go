@@ -21,12 +21,12 @@ func freePort(t *testing.T) string {
 	return port
 }
 
-// metricsStatus polls GET /metrics on the port and returns the last status, or 0.
-func metricsStatus(port string) int {
+// status polls GET path on the port and returns the status, or 0 when nothing answers.
+func status(port, path string) int {
 	client := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := client.Get("http://127.0.0.1:" + port + "/metrics")
+		resp, err := client.Get("http://127.0.0.1:" + port + path)
 		if err == nil {
 			_ = resp.Body.Close()
 			return resp.StatusCode
@@ -36,7 +36,7 @@ func metricsStatus(port string) int {
 	return 0
 }
 
-func TestStartMetricsServerRetriesAfterAFailedBindThenStartsOnce(t *testing.T) {
+func TestStartMetricsServerRetriesAfterAFailedBindAndIsSafeToCallConcurrently(t *testing.T) {
 	port := freePort(t)
 
 	// Something else holds the port, so the first start cannot bind
@@ -59,7 +59,9 @@ func TestStartMetricsServerRetriesAfterAFailedBindThenStartsOnce(t *testing.T) {
 	wg.Wait()
 	StartMetricsServer(port)
 
-	if status := metricsStatus(port); status != http.StatusOK {
-		t.Fatalf("GET /metrics returned %d, want 200", status)
+	for _, path := range []string{"/metrics", "/health"} {
+		if got := status(port, path); got != http.StatusOK {
+			t.Fatalf("GET %s returned %d, want 200", path, got)
+		}
 	}
 }
