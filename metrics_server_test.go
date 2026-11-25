@@ -12,7 +12,7 @@ import (
 // freePort returns a port nothing listens on right now.
 func freePort(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
