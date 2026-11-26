@@ -1,6 +1,6 @@
 {
     "name": "boilerplates",
-    "version": "v0.0.19-alpha",
+    "version": "v0.0.20-alpha",
     "description": "Boilerplate code and templates for CodeClarity backend services",
     "author": "CodeClarity Team",
     "license": "AGPL-3.0"
